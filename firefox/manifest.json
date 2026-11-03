@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "PZ Mod Manager",
+  "version": "0.2.0",
+  "description": "Right-click a Project Zomboid Workshop item or collection to install it with pzmodmgr.",
+  "permissions": ["menus", "nativeMessaging", "notifications"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pzmodmgr@local",
+      "strict_min_version": "91.0"
+    }
+  }
+}
