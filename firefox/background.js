@@ -26,7 +26,9 @@ browser.menus.removeAll().then(() => {
     id: "pzmodmgr-add-page",
     title: "Add to PZ Mod Manager",
     contexts: ["page"],
-    targetUrlPatterns: ["*://steamcommunity.com/sharedfiles/filedetails/*"]
+    // Firefox only accepts targetUrlPatterns for link/media contexts. A page
+    // item must be scoped with documentUrlPatterns.
+    documentUrlPatterns: ["*://steamcommunity.com/sharedfiles/filedetails/*"]
   });
   browser.menus.create({
     id: "pzmodmgr-add-link",
