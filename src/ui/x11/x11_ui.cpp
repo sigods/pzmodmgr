@@ -1,6 +1,7 @@
 #include "ui/ui.hpp"
 #include "core/commands.hpp"
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <algorithm>
@@ -39,6 +40,18 @@ void draw(Display* d, Window w, GC gc, int x, int y, const std::string& s) {
 bool in_rect(int x, int y, int rx, int ry, int rw, int rh) {
     return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
 }
+
+std::string clean_pasted_text(std::string text) {
+    const auto nul = text.find('\0');
+    if (nul != std::string::npos) text.resize(nul);
+    const auto line = text.find_first_of("\r\n");
+    if (line != std::string::npos) text.resize(line);
+    std::size_t begin = 0;
+    while (begin < text.size() && (text[begin] == ' ' || text[begin] == '\t')) ++begin;
+    std::size_t end = text.size();
+    while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t')) --end;
+    return text.substr(begin, end - begin);
+}
 }  // namespace
 
 int run_ui(ModManager& mm) {
@@ -70,9 +83,20 @@ int run_ui(ModManager& mm) {
     GC gc = XCreateGC(dpy, win, 0, nullptr);
     XMapWindow(dpy, win);
 
+    Atom clipboard = XInternAtom(dpy, "CLIPBOARD", False);
+    Atom utf8 = XInternAtom(dpy, "UTF8_STRING", False);
+    Atom paste_prop = XInternAtom(dpy, "PZMODMGR_PASTE", False);
+
     std::deque<std::string> log;
     std::string input;
     bool busy = false;
+
+    enum class PasteField { Input, SettingsPath, SettingsUser };
+    PasteField paste_field = PasteField::Input;
+    Atom paste_selection = None;
+    Time paste_time = CurrentTime;
+    bool paste_pending = false;
+    bool paste_fallback = false;
 
     std::set<std::uint64_t> selected_ids;
     bool confirm_remove = false;
@@ -273,6 +297,36 @@ int run_ui(ModManager& mm) {
         redraw();
     };
 
+    auto paste_into_field = [&](const std::string& raw) {
+        const std::string text = clean_pasted_text(raw);
+        if (text.empty()) {
+            push("Clipboard is empty.");
+            redraw();
+            return;
+        }
+        if (settings_open) {
+            if (paste_field == PasteField::SettingsPath) settings_path += text;
+            else settings_user += text;
+        } else {
+            input += text;
+        }
+        redraw();
+    };
+
+    auto request_paste = [&](Atom selection, bool fallback, Time time) {
+        if (busy) return;
+        paste_field = settings_open
+            ? (settings_field == 0 ? PasteField::SettingsPath : PasteField::SettingsUser)
+            : PasteField::Input;
+        paste_selection = selection;
+        paste_time = time;
+        paste_fallback = fallback;
+        paste_pending = true;
+        XConvertSelection(dpy, selection, fallback ? XA_STRING : utf8,
+                          paste_prop, win, time);
+        XFlush(dpy);
+    };
+
     push("Paste a Workshop URL or ID, then click Add / Install.");
     push("Click rows to select multiple, then Update selected / Remove selected.");
     redraw();
@@ -291,6 +345,17 @@ int run_ui(ModManager& mm) {
                 const int x = ev.xbutton.x, y = ev.xbutton.y;
 
                 if (settings_open) {
+                    if (ev.xbutton.button == Button2) {
+                        if (in_rect(x, y, 20, 78, 740, 24)) {
+                            settings_field = 0;
+                            request_paste(XA_PRIMARY, false, ev.xbutton.time);
+                        } else if (in_rect(x, y, 20, 138, 740, 24)) {
+                            settings_field = 1;
+                            request_paste(XA_PRIMARY, false, ev.xbutton.time);
+                        }
+                        redraw();
+                        break;
+                    }
                     if (in_rect(x, y, 20, 78, 740, 24)) settings_field = 0;
                     else if (in_rect(x, y, 20, 138, 740, 24)) settings_field = 1;
                     else if (in_rect(x, y, 20, 220, 120, 26)) save_settings();
@@ -299,6 +364,11 @@ int run_ui(ModManager& mm) {
                     break;
                 }
 
+                if (ev.xbutton.button == Button2) {
+                    if (in_rect(x, y, kAddX, kAddY, kAddW, kAddH))
+                        request_paste(XA_PRIMARY, false, ev.xbutton.time);
+                    break;
+                }
                 if (ev.xbutton.button == Button4) {
                     list_offset = std::max(0, list_offset - 3);
                     redraw();
@@ -369,11 +439,54 @@ int run_ui(ModManager& mm) {
                     }
                 }
                 break;
+            case SelectionNotify: {
+                if (!paste_pending || ev.xselection.selection != paste_selection) break;
+                if (ev.xselection.property == None) {
+                    if (!paste_fallback) {
+                        request_paste(paste_selection, true, paste_time);
+                    } else {
+                        paste_pending = false;
+                        push("Nothing to paste from the clipboard.");
+                        redraw();
+                    }
+                    break;
+                }
+
+                Atom type;
+                int format = 0;
+                unsigned long count = 0, remaining = 0;
+                unsigned char* data = nullptr;
+                int rc = XGetWindowProperty(dpy, win, ev.xselection.property, 0, 65536,
+                                            True, AnyPropertyType, &type, &format,
+                                            &count, &remaining, &data);
+                paste_pending = false;
+                if (rc != Success || !data || format != 8) {
+                    if (data) XFree(data);
+                    push("Could not read the clipboard.");
+                    redraw();
+                    break;
+                }
+                std::string text(reinterpret_cast<char*>(data), static_cast<std::size_t>(count));
+                XFree(data);
+                paste_into_field(text);
+                break;
+            }
             case KeyPress: {
                 if (busy) break;
                 char buf[32];
                 KeySym ks;
                 int n = XLookupString(&ev.xkey, buf, sizeof buf, &ks, nullptr);
+
+                const bool ctrl = (ev.xkey.state & ControlMask) != 0;
+                const bool shift = (ev.xkey.state & ShiftMask) != 0;
+                if (ctrl && (ks == XK_v || ks == XK_V)) {
+                    request_paste(clipboard, false, ev.xkey.time);
+                    break;
+                }
+                if (shift && ks == XK_Insert) {
+                    request_paste(XA_PRIMARY, false, ev.xkey.time);
+                    break;
+                }
 
                 if (settings_open) {
                     if (ks == XK_Return || ks == XK_KP_Enter) {

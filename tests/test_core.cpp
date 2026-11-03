@@ -108,6 +108,16 @@ void test_read_mod_info(const pz::fs::path& root) {
     }
 
     check(!pz::read_mod_info(root / "missing").has_value(), "missing mod.info returns nullopt");
+
+    auto versioned = root / "read_mod_info_versioned";
+    write_file(versioned / "41" / "mod.info", "name=Old version\nid=old\n");
+    write_file(versioned / "42" / "mod.info", "name=New version\nid=new\n");
+    info = pz::read_mod_info(versioned);
+    check(info.has_value(), "B42 versioned mod.info readable");
+    if (info) {
+        check(info->id == "new", "newest B42 version id selected");
+        check(info->name == "New version", "newest B42 version name selected");
+    }
 }
 
 void test_discover_mod_roots(const pz::fs::path& root) {
@@ -128,6 +138,14 @@ void test_discover_mod_roots(const pz::fs::path& root) {
         saw_b = saw_b || r.filename() == "B";
     }
     check(saw_a && saw_b, "both mod folders discovered");
+
+    auto versioned = root / "versioned";
+    write_file(versioned / "mods" / "HorseMod" / "42" / "mod.info",
+               "id=HorseMod\nname=Horse Mod\n");
+    pz::fs::create_directories(versioned / "mods" / "HorseMod" / "common");
+    roots = pz::discover_mod_roots(versioned);
+    check(roots.size() == 1 && roots[0].filename() == "HorseMod",
+          "B42 version folder keeps the mod folder as the install root");
 
     auto empty = root / "empty";
     pz::fs::create_directories(empty);
