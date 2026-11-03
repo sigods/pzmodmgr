@@ -10,7 +10,8 @@ Instructions for AI coding agents working in this repository.
 - Copies the mod files into the user mods folder `~/Zomboid/mods` (Windows: `%USERPROFILE%\Zomboid\mods`).
 - Works for GOG and Steam installs, because both use the same `Zomboid` user folder. The game client is never touched.
 - Native UIs: Win32 (Windows) and Xlib (Linux/X11). A CLI mode runs the same commands.
-- Current input is a pasted Workshop URL or numeric ID (bare input means `add`). Collections are expanded via the Steam Web API and every child item is installed. Search is not implemented and is out of scope for now.
+- Current input is a pasted Workshop URL or numeric ID (bare input means `add`). Collections are expanded via the Steam Web API and every child item is installed. Local filtering of installed mods is implemented; Workshop search is out of scope for now.
+- Update checks use the Steam Web API. Installed cards show author and `modversion`; `versionMin`/`versionMax` are treated as major game builds (41/42/43) when deciding whether an install/update is compatible.
 - Steam Web API calls use the system `curl` binary; no libcurl link dependency.
 
 ## Layout
@@ -23,6 +24,8 @@ Instructions for AI coding agents working in this repository.
 - `src/core/mod_manager.cpp`: install, remove, update, the `installed.tsv` database, and backups.
 - `src/core/commands.cpp`: the command parser shared by CLI and both UIs.
 - `src/ui/win32/`, `src/ui/x11/`: UI code only. They call `run_command`, never core internals directly.
+- `src/ui/mod_icon.cpp`, `third_party/stb_image.h`: shared icon decoding for the two native UIs.
+- `src/core/mod_info.cpp`: resolves the `icon=` PNG and version bounds from B41/B42 mod layouts.
 
 ## Build and run
 
@@ -47,7 +50,8 @@ Rules for agents
     Never write outside ~/Zomboid (the mods folder and ~/Zomboid/pzmodmgr) and the user-set steamcmd path. The built-in steamcmd lives in ~/Zomboid/pzmodmgr/steamcmd.
     UI actions that call steamcmd must not block the UI thread. Use a worker thread and marshal logs back (PostMessage on Win32, a self-pipe on X11).
     Quote all paths and arguments when building shell commands. Do not concatenate raw user input into a command without the quote() helper.
-    Keep the code C++17 and dependency-free beyond the OS SDK and Xlib.
+    Keep the code C++17 and dependency-free beyond the OS SDK, Xlib, and the vendored
+    `stb_image` decoder used for mod icons.
     Do not invent steamcmd output formats. Verify the content path against a real download before changing steamcmd.cpp.
     Add a test for any change to parse_workshop_id, discover_mod_roots, or read_mod_info.
 
@@ -55,8 +59,8 @@ Open TODO (priority order)
 
     Steam Guard: detect the prompt and tell the user to run steamcmd manually once.
     Support custom Zomboid locations (-cachedir=).
-    Add fixture-based tests for parse_workshop_id, discover_mod_roots, and read_mod_info.
     Optional: hide the console on Windows (-mwindows or /SUBSYSTEM:WINDOWS).
+    Optional: add an automatic, non-blocking update check after the first paint.
 
 Style
 

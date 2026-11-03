@@ -43,6 +43,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         if (missing != 0) msg += ", " + std::to_string(missing) + " not installed";
         return {missing == 0, msg};
     }
+    if (cmd == "check") return mm.check_updates(log);
     if (cmd == "update") {
         if (arg.empty()) return mm.update_all(log);
         auto ids = parse_ids(arg);

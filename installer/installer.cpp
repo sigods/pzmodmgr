@@ -106,6 +106,7 @@ int g_dpi = 96;
 
 bool g_installing = false;
 bool g_installed = false;
+bool g_upgrade = false;
 bool g_launch_after = false;
 bool g_firefox_installed = false;
 bool g_chromium_installed = false;
@@ -337,6 +338,31 @@ bool set_reg_dword(HKEY root, const wchar_t* subkey, const wchar_t* name, DWORD 
                                    reinterpret_cast<const BYTE*>(&value), sizeof value);
     RegCloseKey(key);
     return rc == ERROR_SUCCESS;
+}
+
+std::wstring get_reg_sz(HKEY root, const wchar_t* subkey, const wchar_t* name) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subkey, 0, KEY_READ, &key) != ERROR_SUCCESS) return {};
+    wchar_t value[32768]{};
+    DWORD bytes = sizeof(value);
+    DWORD type = 0;
+    const LONG rc = RegQueryValueExW(key, name, nullptr, &type,
+                                     reinterpret_cast<BYTE*>(value), &bytes);
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS || type != REG_SZ) return {};
+    return value;
+}
+
+// Setup is also the updater. If a previous per-user install is registered,
+// reuse its folder so the new version replaces the old one instead of
+// creating a second copy somewhere else.
+std::wstring existing_install_dir() {
+    const std::wstring dir = get_reg_sz(HKEY_CURRENT_USER, kUninstallKey, L"InstallLocation");
+    if (dir.empty() || dir.size() <= 3 || PathIsRootW(dir.c_str())) return {};
+    if (!file_exists(join(dir, L"pzmodmgr.exe"))) return {};
+    const std::wstring profile = known_folder(FOLDERID_Profile);
+    if (!profile.empty() && path_is_under(dir, join(profile, L"Zomboid"))) return {};
+    return dir;
 }
 
 bool create_shortcut(const std::wstring& shortcut, const std::wstring& target,
@@ -621,6 +647,8 @@ void seed_default_config(std::wstring& warning) {
 }
 
 std::wstring default_install_dir() {
+    const std::wstring existing = existing_install_dir();
+    if (!existing.empty()) return existing;
     const std::wstring local = known_folder(FOLDERID_LocalAppData);
     return local.empty() ? L"" : join(join(local, L"Programs"), L"PZModManager");
 }
@@ -740,7 +768,7 @@ bool perform_install(const std::wstring& raw_dir, bool start_menu, bool desktop,
 
     if (!silent) {
         SendMessageW(g_progress, PBM_SETPOS, needed + 1, 0);
-        set_status(L"Installed successfully.");
+        set_status(g_upgrade ? L"Updated successfully." : L"Installed successfully.");
         UpdateWindow(g_hwnd);
     }
     return true;
@@ -821,7 +849,7 @@ void begin_install() {
         EnableWindow(g_launch, TRUE);
         EnableWindow(g_install, TRUE);
         EnableWindow(g_cancel, TRUE);
-        SetWindowTextW(g_install, L"Install");
+        SetWindowTextW(g_install, g_upgrade ? L"Update" : L"Install");
         set_status(L"Installation failed.");
         show_error(warning);
         return;
@@ -836,7 +864,8 @@ void begin_install() {
         MessageBoxW(g_hwnd, warning.c_str(), L"Installed with warnings",
                     MB_OK | MB_ICONWARNING);
     }
-    set_status(L"Installed successfully. Select Finish to close.");
+    set_status(g_upgrade ? L"Updated successfully. Select Finish to close."
+                         : L"Installed successfully. Select Finish to close.");
 }
 
 void paint_window(HWND hwnd) {
@@ -904,7 +933,10 @@ void create_controls(HWND hwnd) {
     g_body_font = make_font(9, FW_NORMAL);
     g_small_font = make_font(8, FW_NORMAL);
 
-    HWND heading = CreateWindowW(L"STATIC", L"Install PZ Mod Manager",
+    g_upgrade = !existing_install_dir().empty();
+    HWND heading = CreateWindowW(L"STATIC",
+                                 g_upgrade ? L"Update PZ Mod Manager"
+                                           : L"Install PZ Mod Manager",
                                  WS_CHILD | WS_VISIBLE | SS_LEFT, S(24), S(116), S(600),
                                  S(30), hwnd, nullptr, g_instance, nullptr);
     set_font(heading, g_heading_font);
@@ -983,12 +1015,14 @@ void create_controls(HWND hwnd) {
                                  nullptr);
     SendMessageW(g_progress, PBM_SETRANGE32, 0, kPayloadCount + 1);
 
-    g_status = CreateWindowW(L"STATIC", L"Ready to install.", WS_CHILD | WS_VISIBLE,
-                             S(24), S(398), S(612), S(20), hwnd, nullptr, g_instance,
-                             nullptr);
+    g_status = CreateWindowW(L"STATIC",
+                             g_upgrade ? L"Ready to update. Existing mods and settings are kept."
+                                       : L"Ready to install.",
+                             WS_CHILD | WS_VISIBLE, S(24), S(398), S(612), S(20), hwnd,
+                             nullptr, g_instance, nullptr);
     set_font(g_status, g_small_font);
 
-    g_install = CreateWindowW(L"BUTTON", L"Install",
+    g_install = CreateWindowW(L"BUTTON", g_upgrade ? L"Update" : L"Install",
                               WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
                               S(450), S(432), S(90), S(30), hwnd,
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_INSTALL)),

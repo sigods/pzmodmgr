@@ -25,7 +25,7 @@ cmake --install "$BUILD" --prefix "$STAGE" >/dev/null
 cp -R "$ROOT/firefox" "$STAGE/firefox"
 cp -R "$ROOT/chrome-extension" "$STAGE/chrome-extension"
 rm -f "$STAGE/firefox/README.md" "$STAGE/chrome-extension/README.md"
-cp "$ROOT/src/ui/win32/pzmodmgr.png" "$STAGE/pzmodmgr.png"
+cp "$ROOT/assets/pzmodmgr.png" "$STAGE/pzmodmgr.png"
 cp "$ROOT/installer/README-Linux.txt" "$STAGE/README.txt"
 cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
 rm -f "$STAGE/README.md" "$STAGE/LICENSE"

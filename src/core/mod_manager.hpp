@@ -1,6 +1,8 @@
 #pragma once
+#include "core/mod_info.hpp"
 #include "core/types.hpp"
 #include <cstdint>
+#include <map>
 #include <vector>
 
 namespace pz {
@@ -12,13 +14,22 @@ public:
     Result remove(std::uint64_t workshop_id, const LogFn& log);
     Result update_one(std::uint64_t workshop_id, const LogFn& log);
     Result update_all(const LogFn& log);
+    Result check_updates(const LogFn& log);
 
     std::vector<InstalledMod> list() const { return db_; }
     Config& config() { return cfg_; }
+    std::optional<ModInfo> info_for(const std::string& folder) const {
+        return read_mod_info(cfg_.user_mods_dir / folder, game_version_);
+    }
+    const std::string& game_version() const { return game_version_; }
+    fs::path icon_for(const std::string& folder) const;
+    bool update_available(std::uint64_t workshop_id) const;
 
 private:
     Config cfg_;
+    std::string game_version_;
     std::vector<InstalledMod> db_;
+    std::map<std::uint64_t, bool> updates_;
 
     fs::path db_path() const { return cfg_.data_dir / "installed.tsv"; }
     void load_db();

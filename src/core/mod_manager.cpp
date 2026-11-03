@@ -3,8 +3,10 @@
 #include "core/steamcmd.hpp"
 #include "core/url.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 namespace pz {
@@ -29,9 +31,28 @@ bool move_tree(const fs::path& src, const fs::path& dst) {
 std::string stamp() {
     return std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
 }
+
+std::string read_game_version(const fs::path& zomboid_dir) {
+    std::ifstream in(zomboid_dir / "version.txt");
+    std::string line;
+    if (!std::getline(in, line)) return {};
+    std::size_t begin = 0, end = 0;
+    while (begin < line.size() && std::isspace(static_cast<unsigned char>(line[begin]))) ++begin;
+    end = begin;
+    while (end < line.size() && !std::isspace(static_cast<unsigned char>(line[end]))) ++end;
+    return line.substr(begin, end - begin);
+}
+
+std::string version_range(const ModInfo& info) {
+    if (info.version_min.empty() && info.version_max.empty()) return {};
+    if (info.version_max.empty()) return "PZ " + info.version_min + "+";
+    if (info.version_min.empty()) return "PZ up to " + info.version_max;
+    return "PZ " + info.version_min + "-" + info.version_max;
+}
 }  // namespace
 
-ModManager::ModManager(Config cfg) : cfg_(std::move(cfg)) {
+ModManager::ModManager(Config cfg)
+    : cfg_(std::move(cfg)), game_version_(read_game_version(cfg_.zomboid_dir)) {
     fs::create_directories(cfg_.user_mods_dir);
     fs::create_directories(cfg_.data_dir);
     load_db();
@@ -59,6 +80,7 @@ Result ModManager::remove(std::uint64_t id, const LogFn& log) {
         any = true;
     }
     if (!any) return {false, "Not installed: " + std::to_string(id)};
+    updates_.erase(id);
     db_.erase(std::remove_if(db_.begin(), db_.end(),
               [&](const InstalledMod& m) { return m.workshop_id == id; }), db_.end());
     save_db();
@@ -69,10 +91,14 @@ Result ModManager::update_one(std::uint64_t id, const LogFn& log) {
     if (!is_installed(id)) return {false, "Not installed: " + std::to_string(id)};
     auto remote = fetch_remote_time_updated(id);
     if (remote == 0) return {false, "Update check failed: " + std::to_string(id)};
-    if (remote <= recorded_time(id)) return {true, "Up to date: " + std::to_string(id)};
+    if (remote <= recorded_time(id)) {
+        updates_[id] = false;
+        return {true, "Up to date: " + std::to_string(id)};
+    }
 
     auto r = install(id, remote, log);
     if (!r.ok) return r;
+    updates_[id] = false;
     return {true, "Updated " + std::to_string(id) + ": " + r.message};
 }
 
@@ -91,16 +117,53 @@ Result ModManager::update_all(const LogFn& log) {
             continue;
         }
         if (remote <= recorded_time(id)) {
+            updates_[id] = false;
             log("up to date: " + std::to_string(id));
             continue;
         }
         auto r = install(id, remote, log);
         log((r.ok ? "updated: " : "failed: ") + std::to_string(id) + " " + r.message);
-        if (r.ok) ++updated;
+        if (r.ok) {
+            updates_[id] = false;
+            ++updated;
+        }
     }
     std::string msg = "Updated " + std::to_string(updated) + " mod item(s)";
     if (skipped != 0) msg += ", skipped " + std::to_string(skipped) + " (update check failed)";
     return {true, msg};
+}
+
+Result ModManager::check_updates(const LogFn& log) {
+    std::set<std::uint64_t> seen;
+    int checked = 0, available = 0, failed = 0;
+    for (const auto& m : db_) {
+        if (!seen.insert(m.workshop_id).second) continue;
+        const auto id = m.workshop_id;
+        const auto remote = fetch_remote_time_updated(id);
+        if (remote == 0) {
+            ++failed;
+            log("update check failed: " + std::to_string(id));
+            continue;
+        }
+        ++checked;
+        const bool has_update = remote > recorded_time(id);
+        updates_[id] = has_update;
+        if (has_update) {
+            ++available;
+            log("update available: " + std::to_string(id));
+        } else {
+            log("up to date: " + std::to_string(id));
+        }
+    }
+    std::string msg = "Checked " + std::to_string(checked) + " mod(s), " +
+                      std::to_string(available) + " update(s) available";
+    if (failed != 0) msg += ", " + std::to_string(failed) + " check(s) failed";
+    return {true, msg};
+}
+
+bool ModManager::update_available(std::uint64_t workshop_id) const {
+    auto it = updates_.find(workshop_id);
+    return it != updates_.end() && it->second;
 }
 
 Result ModManager::install_collection(std::uint64_t collection_id,
@@ -146,7 +209,34 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
     if (!dl.ok) return {false, dl.detail};
 
     auto roots = discover_mod_roots(dl.content_dir);
-    if (roots.empty()) return {false, "No mod.info in workshop item " + std::to_string(id)};
+    if (roots.empty()) {
+        std::error_code cleanup_ec;
+        fs::remove_all(dl.content_dir, cleanup_ec);
+        return {false, "No mod.info in workshop item " + std::to_string(id)};
+    }
+
+    // A Workshop item can contain several variants. Keep only those whose
+    // versionMin/versionMax includes the installed Project Zomboid build, so
+    // both first installs and updates cannot replace a working mod with one
+    // that does not support this game version.
+    std::vector<fs::path> compatible;
+    for (const auto& root : roots) {
+        auto info = read_mod_info(root, game_version_);
+        if (!info) continue;
+        if (supports_game_version(*info, game_version_)) {
+            compatible.push_back(root);
+            continue;
+        }
+        const std::string range = version_range(*info);
+        log("skipped " + info->name + " (requires " + range + ", installed " +
+            game_version_ + ")");
+    }
+    if (compatible.empty()) {
+        std::error_code cleanup_ec;
+        fs::remove_all(dl.content_dir, cleanup_ec);
+        return {false, "Mod does not support Project Zomboid " + game_version_};
+    }
+    roots.swap(compatible);
 
     struct Moved {
         fs::path source;
@@ -209,8 +299,14 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
     db_.erase(std::remove_if(db_.begin(), db_.end(),
               [&](const InstalledMod& m) { return m.workshop_id == id; }), db_.end());
     db_.insert(db_.end(), fresh.begin(), fresh.end());
+    updates_[id] = false;
     save_db();
     return {true, "Installed " + std::to_string(fresh.size()) + " mod(s)"};
+}
+
+fs::path ModManager::icon_for(const std::string& folder) const {
+    auto info = read_mod_info(cfg_.user_mods_dir / folder, game_version_);
+    return info ? info->icon : fs::path{};
 }
 
 bool ModManager::is_installed(std::uint64_t id) const {

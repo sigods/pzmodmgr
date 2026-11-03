@@ -65,6 +65,14 @@ for exe in pzmodmgr.exe pzmodmgr_native_host.exe; do
     fi
 done
 
+# Optional: pack the main executable with UPX (the same size trick used by
+# many small Windows tools). Set UPX_BIN=/path/to/upx to enable it. The
+# native host is left unpacked because browsers may inspect it.
+if [ -n "${UPX_BIN:-}" ] && [ -x "$UPX_BIN" ]; then
+    echo "==> packing pzmodmgr.exe with UPX"
+    "$UPX_BIN" --best --lzma "$STAGE/pzmodmgr.exe"
+fi
+
 echo "==> building portable zip"
 rm -f "$OUT/$NAME.zip"
 ( cd "$OUT" && zip -q -r -9 "$NAME.zip" "$NAME" )

@@ -15,13 +15,20 @@ steamcmd instead, set it with `config steamcmd_exe /path/to/steamcmd.sh`.
 A bare Workshop URL or ID can also be pasted without `add`. A collection
 installs every child item it contains.
 
-The GUI has a Workshop URL/ID field with **Add / Install**, a multi-select list
-of installed mods with details, **Update selected**, **Remove selected**,
-**Update all**, and **Select all** actions, plus **Settings** for the steamcmd
-path and Steam username. Win32 uses Ctrl/Shift-click and double-click to update;
-X11 toggles rows, confirms a removal with a second click, and scrolls the list
-with the mouse wheel. The CLI mode still accepts all commands. No password is
-stored: run steamcmd manually once so its login is cached.
+The GUI is a native utility on both platforms: an accent-orange install action,
+a card list with each mod's `icon=` PNG, author and `modversion`, Ctrl/Shift
+multi-select, double-click to update, and a compact activity log. The list can be
+filtered by name/author/version/folder, restricted to mods with an available
+update, and sorted by name or last update. `Check` refreshes update availability
+through the Steam Web API; `UPDATE` badges mark the results. Installs and updates
+are skipped when `versionMin`/`versionMax` target a different major Project
+Zomboid build (41, 42, 43), so a newer Workshop item cannot replace a working mod
+with one that does not support the installed game. X11 adds Ctrl+V / Shift+Insert
+/ middle-click paste; Win32 keeps the native edit and list controls. The UI is
+drawn with Win32 and Xlib rather than a cross-platform toolkit, keeping the
+downloads small and dependency-free; `third_party/stb_image.h` is compiled in
+only to decode mod icons. The CLI mode still accepts all commands. No password
+is stored: run steamcmd manually once so its login is cached.
 
 Normal runs use the real `~/Zomboid/mods` folder (`%USERPROFILE%\Zomboid\mods`
 on Windows). steamcmd is built in: on first use the app downloads Valve's
@@ -48,8 +55,12 @@ ctest --test-dir build --output-on-failure
 Windows distribution (portable ZIP + setup EXE):
 
 ```bash
-./scripts/package_windows.sh
+UPX_BIN=/path/to/upx ./scripts/package_windows.sh   # optional compression
 ```
+
+The setup reuses a registered previous install directory, so a newer setup
+upgrades in place instead of creating a second copy. The Linux installer follows
+the existing `~/.local/bin/pzmodmgr` symlink for the same behavior.
 
 Linux distribution (single self-extracting `.sh` with a `.desktop` entry):
 

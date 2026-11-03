@@ -53,6 +53,9 @@ cat > "$content/mods/$mod/mod.info" <<EOF
 id=$mod
 name=Fixture Mod $item
 EOF
+if [ -n "${FAKE_STEAMCMD_VERSION_MIN:-}" ]; then
+    printf 'versionMin=%s\n' "$FAKE_STEAMCMD_VERSION_MIN" >> "$content/mods/$mod/mod.info"
+fi
 
 echo "Success. Downloaded item $item to \"$content\" (0 bytes)"
 echo "Logged in OK."

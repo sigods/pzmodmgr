@@ -98,16 +98,33 @@ void test_builtin_steamcmd(const pz::fs::path& root) {
 
 void test_read_mod_info(const pz::fs::path& root) {
     auto dir = root / "read_mod_info";
-    write_file(dir / "mod.info", "name=My Mod\r\nid=mymod\r\n");
+    write_file(dir / "mod.info",
+               "name=My Mod\r\nid=mymod\r\nauthor=Alice\r\nmodversion=1.2.3\r\n");
 
     auto info = pz::read_mod_info(dir);
     check(info.has_value(), "mod.info readable");
     if (info) {
         check(info->id == "mymod", "mod.info id parsed");
         check(info->name == "My Mod", "mod.info name parsed (CRLF stripped)");
+        check(info->author == "Alice", "mod.info author parsed");
+        check(info->mod_version == "1.2.3", "mod.info modversion parsed");
     }
 
     check(!pz::read_mod_info(root / "missing").has_value(), "missing mod.info returns nullopt");
+
+    auto with_icon = root / "read_mod_info_icon";
+    write_file(with_icon / "mod.info", "name=Icon Mod\nicon=art/custom.png\n");
+    write_file(with_icon / "art" / "custom.png", "not actually decoded here");
+    info = pz::read_mod_info(with_icon);
+    check(info.has_value() && info->icon == with_icon / "art" / "custom.png",
+          "mod.info icon path resolved");
+
+    auto b42_icon = root / "read_mod_info_b42_icon";
+    write_file(b42_icon / "42" / "mod.info", "name=B42 Icon\nicon=icon_file.png\n");
+    write_file(b42_icon / "common" / "icon_file.png", "not actually decoded here");
+    info = pz::read_mod_info(b42_icon);
+    check(info.has_value() && info->icon == b42_icon / "common" / "icon_file.png",
+          "B42 common icon path resolved");
 
     auto versioned = root / "read_mod_info_versioned";
     write_file(versioned / "41" / "mod.info", "name=Old version\nid=old\n");
@@ -118,6 +135,32 @@ void test_read_mod_info(const pz::fs::path& root) {
         check(info->id == "new", "newest B42 version id selected");
         check(info->name == "New version", "newest B42 version name selected");
     }
+
+    auto ranged = root / "read_mod_info_ranged";
+    write_file(ranged / "42.20" / "mod.info",
+               "name=For 42.20\nid=ranged\nversionMin=42.20\nversionMax=42.21\n");
+    write_file(ranged / "42.22" / "mod.info",
+               "name=For 42.22\nid=ranged\nversionMin=42.22\n");
+    info = pz::read_mod_info(ranged, "42.21.0");
+    check(info.has_value() && info->name == "For 42.22",
+          "newest same-major version folder selected for the game build");
+    if (info) {
+        check(pz::supports_game_version(*info, "42.21.0"),
+              "a 42.22 mod is allowed on 42.21");
+        check(!pz::supports_game_version(*info, "43.0.0"),
+              "a 42-only mod is blocked on build 43");
+    }
+
+    pz::ModInfo old_build;
+    old_build.version_min = "41.78";
+    old_build.version_max = "41.78";
+    check(!pz::supports_game_version(old_build, "42.21.0"),
+          "a 41-only mod is blocked on build 42");
+
+    check(pz::compare_versions("42.21.0", "42.21") == 0,
+          "missing version components compare as zero");
+    check(pz::compare_versions("42.20", "42.21.0") < 0, "older build compares lower");
+    check(pz::compare_versions("v42.22.1", "42.21.9") > 0, "v-prefixed build compares higher");
 }
 
 void test_discover_mod_roots(const pz::fs::path& root) {
@@ -205,6 +248,7 @@ void test_install_flow(const pz::fs::path& root) {
     make_executable(fake_steamcmd);
     cfg.steamcmd_exe = fake_steamcmd;
     cfg.steam_user = "test-user";
+    write_file(zombie / "version.txt", "42.21.0 4a0e9546ec\n");
 
     // Fake curl serves a canned Steam API response from the environment, so
     // the update flow can be tested without network access.
@@ -270,7 +314,17 @@ exit "${FAKE_CURL_EXIT:-0}"
           "Steam API POST body built");
     check(mm.add("123456789", logfn).ok == false, "duplicate add rejected");
 
+    // A check records update availability without downloading.
+    set_json_time(1700000500);
+    const std::string downloads_before_check = read_file(steam_log);
+    log.clear();
+    auto check_result = mm.check_updates(logfn);
+    check(check_result.ok, "check_updates succeeds: " + check_result.message);
+    check(mm.update_available(123456789), "update availability recorded");
+    check(read_file(steam_log) == downloads_before_check, "check does not download");
+
     // Unchanged remote time: update must not call steamcmd or create a backup.
+    set_json_time(1700000000);
     const std::string downloads_before = read_file(steam_log);
     log.clear();
     auto u = mm.update_all(logfn);
@@ -320,6 +374,19 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(!bad.ok && bad.message.find("steamcmd failed") != std::string::npos,
           "failed download reported: " + bad.message);
     check(mm.list().size() == 1, "failed download does not change db");
+
+    // A first install whose mod.info targets another major game build is refused.
+    setenv("FAKE_STEAMCMD_VERSION_MIN", "43.0", 1);
+    log.clear();
+    auto incompatible = mm.add("777", logfn);
+    check(!incompatible.ok && incompatible.message.find("does not support") != std::string::npos,
+          "incompatible first install rejected: " + incompatible.message);
+    check(!pz::fs::exists(cfg.user_mods_dir / "FixtureMod777"),
+          "incompatible first install leaves no mod folder");
+    check(!pz::fs::exists(cfg.data_dir / "steam_cache" / "steamapps" / "workshop" /
+                          "content" / "108600" / "777"),
+          "incompatible download cache removed");
+    unsetenv("FAKE_STEAMCMD_VERSION_MIN");
 
     // remove command deletes only the recorded folder.
     auto rem = pz::run_command(mm, "remove 123456789", logfn);

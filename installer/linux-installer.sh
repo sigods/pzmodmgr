@@ -29,9 +29,18 @@ case "$(basename "$0")" in uninstall.sh) MODE=uninstall ;; esac
 
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-INSTALL_DIR=${PREFIX:-$DATA_HOME/pzmodmgr}
-INSTALL_DIR=${INSTALL_DIR%/}
 BIN_DIR=$HOME/.local/bin
+
+# Prefer the folder of an existing per-user install, so running a newer
+# installer upgrades it in place even when it was installed with --prefix.
+if [ -z "$PREFIX" ] && [ -L "$BIN_DIR/pzmodmgr" ]; then
+    existing=$(readlink -f "$BIN_DIR/pzmodmgr" 2>/dev/null || true)
+    if [ -n "$existing" ] && [ -x "$existing" ] && [ -f "$(dirname "$existing")/uninstall.sh" ]; then
+        INSTALL_DIR=$(dirname "$existing")
+    fi
+fi
+INSTALL_DIR=${INSTALL_DIR:-${PREFIX:-$DATA_HOME/pzmodmgr}}
+INSTALL_DIR=${INSTALL_DIR%/}
 APPLICATIONS=$DATA_HOME/applications
 ICON_DIR=$DATA_HOME/icons/hicolor/256x256/apps
 DESKTOP_DIR=$HOME/Desktop

@@ -14,7 +14,8 @@ add_library(pzcore STATIC
   src/core/commands.cpp)
 target_include_directories(pzcore PUBLIC src)
 
-add_executable(pzmodmgr src/main.cpp)
+add_executable(pzmodmgr src/main.cpp src/ui/mod_icon.cpp)
+target_include_directories(pzmodmgr PRIVATE third_party)
 target_link_libraries(pzmodmgr PRIVATE pzcore Threads::Threads)
 
 add_executable(pzmodmgr_native_host src/native/native_host.cpp)
