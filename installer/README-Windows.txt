@@ -78,6 +78,11 @@ A bare Workshop URL or ID also acts as add. Updating uses the Steam Web API to
 skip unchanged mods. API calls and the one-time steamcmd download use curl.exe
 from Windows 10 or later.
 
+pzmodmgr.exe is a windowed program, so starting it from Explorer or the Start
+menu opens only the manager window. Commands typed in Command Prompt or
+PowerShell print into that console. Windows does not wait for windowed programs,
+so scripts should call: start /wait pzmodmgr.exe add ...
+
 Code signing
 ------------
 These builds are not code-signed. Windows SmartScreen may show a warning for

@@ -55,7 +55,7 @@ ctest --test-dir build --output-on-failure
 Windows distribution (portable ZIP + setup EXE):
 
 ```bash
-UPX_BIN=/path/to/upx ./scripts/package_windows.sh   # optional compression
+UPX_BIN=/path/to/upx ./scripts/package_windows.sh   # optional pzmodmgr.exe + setup compression
 ```
 
 The setup reuses a registered previous install directory, so a newer setup

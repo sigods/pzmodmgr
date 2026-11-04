@@ -33,16 +33,32 @@ if(WIN32)
                  "${CMAKE_CURRENT_BINARY_DIR}/pzmodmgr.rc" @ONLY)
   target_sources(pzmodmgr PRIVATE
     src/ui/win32/win32_ui.cpp
+    src/ui/win32/win32_entry.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/pzmodmgr.rc")
+  # CommandLineToArgvW, used by the wide entry point.
+  target_link_libraries(pzmodmgr PRIVATE shell32)
   target_compile_definitions(pzmodmgr PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0601 WINVER=0x0601)
   target_compile_definitions(pzmodmgr_native_host PRIVATE _WIN32_WINNT=0x0601 WINVER=0x0601)
+  # pzmodmgr is a GUI-subsystem program, so starting it from Explorer or a
+  # shortcut opens the manager window alone instead of the manager window plus
+  # an empty console. Its entry point is therefore the GUI one provided by
+  # src/ui/win32/win32_entry.cpp, which re-attaches a console when the CLI is
+  # used. pzmodmgr_native_host must stay console-subsystem: it speaks stdio
+  # with the browser.
+  set_target_properties(pzmodmgr PROPERTIES WIN32_EXECUTABLE TRUE)
   if(MINGW)
+    # MinGW needs -municode to make the CRT call the wide wWinMain.
+    target_link_options(pzmodmgr PRIVATE -municode)
     # The distribution must not depend on MinGW runtime DLLs.
     foreach(target pzmodmgr pzmodmgr_native_host)
       target_link_options(${target} PRIVATE -static -static-libgcc -static-libstdc++)
     endforeach()
   endif()
-  # Add -mwindows (MinGW) or /SUBSYSTEM:WINDOWS (MSVC) to hide the console later.
+  if(MSVC)
+    # pzmodmgr.rc already embeds pzmodmgr.manifest as resource 1; the MSVC
+    # linker's own manifest would be a duplicate.
+    target_link_options(pzmodmgr PRIVATE /MANIFEST:NO)
+  endif()
 else()
   find_package(X11 REQUIRED)
   target_sources(pzmodmgr PRIVATE src/ui/x11/x11_ui.cpp)

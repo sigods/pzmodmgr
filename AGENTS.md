@@ -24,6 +24,7 @@ Instructions for AI coding agents working in this repository.
 - `src/core/mod_manager.cpp`: install, remove, update, the `installed.tsv` database, and backups.
 - `src/core/commands.cpp`: the command parser shared by CLI and both UIs.
 - `src/ui/win32/`, `src/ui/x11/`: UI code only. They call `run_command`, never core internals directly.
+- `src/ui/win32/win32_entry.cpp`: the Windows GUI entry point (`wWinMain`). Decodes the UTF-16 command line, re-attaches a console for CLI mode, then calls `pz::run_app` from `src/main.cpp`.
 - `src/ui/mod_icon.cpp`, `third_party/stb_image.h`: shared icon decoding for the two native UIs.
 - `src/core/mod_info.cpp`: resolves the `icon=` PNG and version bounds from B41/B42 mod layouts.
 
@@ -41,10 +42,17 @@ existing installation instead.
 Windows: use MinGW-w64 or MSVC. The built-in copy goes to
 %USERPROFILE%\Zomboid\pzmodmgr\steamcmd and mods to
 %USERPROFILE%\Zomboid\mods.
+
+On Windows `pzmodmgr.exe` is a GUI-subsystem program, so starting it from
+Explorer or a shortcut opens the manager window alone. CLI runs re-attach to the
+console of the shell that started them (or allocate one when there is none), and
+leave redirected output alone.
+
 Rules for agents
 
     Keep core free of UI code. Anything the user can do goes through run_command.
     Keep stdout clean in the native host: only framed JSON messages, logs go in the response.
+    Keep pzmodmgr a GUI-subsystem program on Windows (WIN32_EXECUTABLE on MSVC/MinGW). Do not add a console subsystem or a second console-only target; its entry point is wWinMain in src/ui/win32/win32_entry.cpp, which calls pz::run_app from main.cpp. pzmodmgr_native_host must stay console-subsystem.
     Never store, log, or pass a Steam password. Authentication relies on steamcmd's cached login. Do not add +login user pass.
     Never delete a folder in ~/Zomboid/mods that the manager did not install (check installed.tsv first). Back up before replacing, as install() does now.
     Never write outside ~/Zomboid (the mods folder and ~/Zomboid/pzmodmgr) and the user-set steamcmd path. The built-in steamcmd lives in ~/Zomboid/pzmodmgr/steamcmd.
@@ -59,7 +67,6 @@ Open TODO (priority order)
 
     Steam Guard: detect the prompt and tell the user to run steamcmd manually once.
     Support custom Zomboid locations (-cachedir=).
-    Optional: hide the console on Windows (-mwindows or /SUBSYSTEM:WINDOWS).
     Optional: add an automatic, non-blocking update check after the first paint.
 
 Style

@@ -65,9 +65,9 @@ for exe in pzmodmgr.exe pzmodmgr_native_host.exe; do
     fi
 done
 
-# Optional: pack the main executable with UPX (the same size trick used by
-# many small Windows tools). Set UPX_BIN=/path/to/upx to enable it. The
-# native host is left unpacked because browsers may inspect it.
+# Optional: pack the main executable and setup with UPX (the same size trick
+# used by many small Windows tools). Set UPX_BIN=/path/to/upx to enable it.
+# The native host is left unpacked because browsers launch it directly.
 if [ -n "${UPX_BIN:-}" ] && [ -x "$UPX_BIN" ]; then
     echo "==> packing pzmodmgr.exe with UPX"
     "$UPX_BIN" --best --lzma "$STAGE/pzmodmgr.exe"
@@ -135,6 +135,14 @@ fi
 if objdump -p "$OUT/$NAME-setup.exe" | grep -Eq 'libstdc\+\+|libgcc|winpthread'; then
     echo "error: setup executable still depends on a MinGW runtime DLL" >&2
     exit 1
+fi
+
+# The installer carries the compressed app plus the native host as RCDATA.
+# Packing the setup image itself takes it below 1 MB without changing the
+# installed files or making the browser-launched native host use UPX.
+if [ -n "${UPX_BIN:-}" ] && [ -x "$UPX_BIN" ]; then
+    echo "==> packing setup with UPX"
+    "$UPX_BIN" --best --lzma "$OUT/$NAME-setup.exe"
 fi
 
 ( cd "$OUT" && sha256sum "$NAME-setup.exe" "$NAME.zip" > SHA256SUMS )

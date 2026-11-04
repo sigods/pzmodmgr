@@ -45,7 +45,7 @@ struct Rect {
 struct Palette {
     unsigned long bg, surface, field, border, border_strong, text, muted;
     unsigned long accent, accent_hover, accent_soft, danger, danger_soft;
-    unsigned long hover, success;
+    unsigned long brand, brand_soft, brand_border, cream, hover, success;
 };
 
 enum class Btn {
@@ -157,72 +157,116 @@ unsigned long visual_pixel(Visual* visual, int r, int g, int b) {
 }
 
 void draw_button_icon(Display* d, Window w, GC gc, Btn b, int x, int cy,
-                      unsigned long color) {
+                      unsigned long color, unsigned long background) {
+    const int top = cy - 9, bottom = cy + 9;
+    auto line = [&](int x1, int y1, int x2, int y2) {
+        XDrawLine(d, w, gc, x1, y1, x2, y2);
+    };
+    auto polygon = [&](std::initializer_list<std::pair<int, int>> points) {
+        std::vector<XPoint> shape;
+        shape.reserve(points.size());
+        for (const auto& point : points) {
+            shape.push_back({static_cast<short>(point.first),
+                             static_cast<short>(point.second)});
+        }
+        XFillPolygon(d, w, gc, shape.data(), static_cast<int>(shape.size()),
+                     Complex, CoordModeOrigin);
+    };
+    auto fill_rect = [&](int rx, int ry, int rw, int rh) {
+        XFillRectangle(d, w, gc, rx, ry, static_cast<unsigned>(rw),
+                       static_cast<unsigned>(rh));
+    };
+
     XSetForeground(d, gc, color);
     XSetLineAttributes(d, gc, 1, LineSolid, CapRound, JoinRound);
     switch (b) {
     case Btn::Install:
+        line(x + 9, top + 1, x + 9, cy);
+        polygon({{x + 3, cy - 1}, {x + 15, cy - 1}, {x + 9, cy + 5}});
+        line(x + 2, cy + 5, x + 2, bottom - 2);
+        line(x + 2, bottom - 2, x + 16, bottom - 2);
+        line(x + 16, bottom - 2, x + 16, cy + 5);
+        break;
     case Btn::Save:
-        XDrawLine(d, w, gc, x + 7, cy - 7, x + 7, cy + 3);
-        XDrawLine(d, w, gc, x + 2, cy - 2, x + 7, cy + 3);
-        XDrawLine(d, w, gc, x + 12, cy - 2, x + 7, cy + 3);
-        XDrawLine(d, w, gc, x, cy + 8, x + 14, cy + 8);
+        line(x + 3, cy, x + 7, cy + 4);
+        line(x + 7, cy + 4, x + 15, cy - 5);
         break;
     case Btn::Update:
+        line(x + 2, cy - 5, x + 11, cy - 5);
+        polygon({{x + 16, cy - 5}, {x + 11, top}, {x + 11, cy - 1}});
+        line(x + 16, cy + 5, x + 7, cy + 5);
+        polygon({{x + 2, cy + 5}, {x + 7, cy + 1}, {x + 7, bottom}});
+        break;
     case Btn::UpdateAll:
-        XDrawLine(d, w, gc, x + 7, cy + 7, x + 7, cy - 7);
-        XDrawLine(d, w, gc, x + 2, cy - 2, x + 7, cy - 7);
-        XDrawLine(d, w, gc, x + 12, cy - 2, x + 7, cy - 7);
-        if (b == Btn::UpdateAll) XDrawLine(d, w, gc, x + 1, cy + 7, x + 13, cy + 7);
+        line(x + 2, cy - 6, x + 10, cy - 6);
+        polygon({{x + 16, cy - 6}, {x + 11, top}, {x + 11, cy - 2}});
+        line(x + 16, cy + 2, x + 8, cy + 2);
+        polygon({{x + 2, cy + 2}, {x + 7, cy - 2}, {x + 7, cy + 6}});
+        line(x + 1, bottom, x + 17, bottom);
         break;
     case Btn::Remove:
-        XDrawRectangle(d, w, gc, x + 2, cy - 3, 10, 9);
-        XDrawLine(d, w, gc, x, cy - 6, x + 14, cy - 6);
-        XDrawLine(d, w, gc, x + 5, cy - 8, x + 9, cy - 8);
-        XDrawLine(d, w, gc, x + 5, cy, x + 5, cy + 4);
-        XDrawLine(d, w, gc, x + 9, cy, x + 9, cy + 4);
+        line(x + 1, cy - 6, x + 17, cy - 6);
+        line(x + 6, cy - 8, x + 6, cy - 6);
+        line(x + 6, cy - 8, x + 12, cy - 8);
+        line(x + 12, cy - 8, x + 12, cy - 6);
+        line(x + 3, cy - 4, x + 3, bottom - 2);
+        line(x + 3, bottom - 2, x + 15, bottom - 2);
+        line(x + 15, bottom - 2, x + 15, cy - 4);
+        line(x + 7, cy, x + 7, bottom - 5);
+        line(x + 11, cy, x + 11, bottom - 5);
         break;
     case Btn::SelectAll:
-        XDrawLine(d, w, gc, x + 1, cy, x + 5, cy + 4);
-        XDrawLine(d, w, gc, x + 5, cy + 4, x + 13, cy - 6);
+        line(x + 1, cy - 8, x + 17, cy - 8);
+        line(x + 17, cy - 8, x + 17, cy + 8);
+        line(x + 17, cy + 8, x + 1, cy + 8);
+        line(x + 1, cy + 8, x + 1, cy - 8);
+        line(x + 5, cy, x + 8, cy + 3);
+        line(x + 8, cy + 3, x + 13, cy - 3);
         break;
     case Btn::Clear:
     case Btn::Cancel:
-        XDrawLine(d, w, gc, x + 2, cy - 6, x + 12, cy + 6);
-        XDrawLine(d, w, gc, x + 12, cy - 6, x + 2, cy + 6);
+        line(x + 3, cy - 6, x + 15, cy + 6);
+        line(x + 15, cy - 6, x + 3, cy + 6);
         break;
     case Btn::Settings:
-        XDrawArc(d, w, gc, x + 1, cy - 6, 12, 12, 0, 360 * 64);
-        XDrawLine(d, w, gc, x + 7, cy - 9, x + 7, cy - 6);
-        XDrawLine(d, w, gc, x + 7, cy + 6, x + 7, cy + 9);
-        XDrawLine(d, w, gc, x - 2, cy, x + 1, cy);
-        XDrawLine(d, w, gc, x + 13, cy, x + 16, cy);
+        fill_rect(x + 7, cy - 9, 4, 4);
+        fill_rect(x + 7, cy + 5, 4, 4);
+        fill_rect(x, cy - 2, 4, 4);
+        fill_rect(x + 14, cy - 2, 4, 4);
+        fill_rect(x + 2, cy - 8, 3, 3);
+        fill_rect(x + 13, cy - 8, 3, 3);
+        fill_rect(x + 2, cy + 5, 3, 3);
+        fill_rect(x + 13, cy + 5, 3, 3);
+        XFillArc(d, w, gc, x + 3, cy - 6, 12, 12, 0, 360 * 64);
+        XSetForeground(d, gc, background);
+        XFillArc(d, w, gc, x + 5, cy - 4, 8, 8, 0, 360 * 64);
+        XSetForeground(d, gc, color);
         break;
     case Btn::FilterAll:
     case Btn::FilterUpdates:
-        XDrawLine(d, w, gc, x, cy - 7, x + 14, cy - 7);
-        XDrawLine(d, w, gc, x + 14, cy - 7, x + 9, cy - 1);
-        XDrawLine(d, w, gc, x + 9, cy - 1, x + 9, cy + 6);
-        XDrawLine(d, w, gc, x + 9, cy + 6, x + 5, cy + 8);
-        XDrawLine(d, w, gc, x + 5, cy + 8, x + 5, cy - 1);
-        XDrawLine(d, w, gc, x + 5, cy - 1, x, cy - 7);
+        line(x + 1, cy - 8, x + 17, cy - 8);
+        line(x + 17, cy - 8, x + 11, cy - 1);
+        line(x + 11, cy - 1, x + 11, cy + 6);
+        line(x + 11, cy + 6, x + 7, bottom);
+        line(x + 7, bottom, x + 7, cy - 1);
+        line(x + 7, cy - 1, x + 1, cy - 8);
         break;
     case Btn::Sort:
-        XDrawLine(d, w, gc, x + 4, cy + 7, x + 4, cy - 7);
-        XDrawLine(d, w, gc, x + 1, cy - 3, x + 4, cy - 7);
-        XDrawLine(d, w, gc, x + 4, cy - 7, x + 7, cy - 3);
-        XDrawLine(d, w, gc, x + 10, cy - 7, x + 10, cy + 7);
-        XDrawLine(d, w, gc, x + 7, cy + 3, x + 10, cy + 7);
-        XDrawLine(d, w, gc, x + 10, cy + 7, x + 13, cy + 3);
+        line(x + 6, bottom, x + 6, cy - 3);
+        polygon({{x + 1, cy - 2}, {x + 11, cy - 2}, {x + 6, top}});
+        line(x + 12, top, x + 12, cy + 3);
+        polygon({{x + 7, cy + 2}, {x + 17, cy + 2}, {x + 12, bottom}});
         break;
     case Btn::Check:
-        XDrawArc(d, w, gc, x + 1, cy - 6, 12, 13, 45 * 64, 270 * 64);
-        XDrawLine(d, w, gc, x + 7, cy - 8, x + 7, cy - 4);
-        XDrawLine(d, w, gc, x + 7, cy - 8, x + 11, cy - 6);
+        XDrawArc(d, w, gc, x + 1, cy - 8, 13, 13, 0, 360 * 64);
+        line(x + 11, cy + 2, x + 16, cy + 7);
+        line(x + 4, cy - 1, x + 6, cy + 1);
+        line(x + 6, cy + 1, x + 9, cy - 3);
         break;
     default:
         break;
     }
+    XSetLineAttributes(d, gc, 1, LineSolid, CapButt, JoinMiter);
 }
 
 XImage* make_icon_image(Display* d, int scr, const ModIcon& icon) {
@@ -287,7 +331,11 @@ int run_ui(ModManager& mm) {
     pal.accent_soft = alloc_color(dpy, scr, 255, 242, 234);
     pal.danger = alloc_color(dpy, scr, 190, 55, 55);
     pal.danger_soft = alloc_color(dpy, scr, 253, 237, 237);
-    pal.hover = alloc_color(dpy, scr, 248, 250, 252);
+    pal.brand = alloc_color(dpy, scr, 44, 99, 69);
+    pal.brand_soft = alloc_color(dpy, scr, 235, 244, 238);
+    pal.brand_border = alloc_color(dpy, scr, 182, 204, 188);
+    pal.cream = alloc_color(dpy, scr, 255, 248, 234);
+    pal.hover = alloc_color(dpy, scr, 244, 248, 245);
     pal.success = alloc_color(dpy, scr, 36, 122, 80);
 
     Window win = XCreateSimpleWindow(dpy, RootWindow(dpy, scr), 80, 60, kW, kH, 1,
@@ -495,31 +543,37 @@ int run_ui(ModManager& mm) {
         unsigned long fill_color = pal.surface;
         unsigned long border_color = pal.border;
         unsigned long text_color = pal.text;
+        unsigned long icon_color = pal.brand;
         if (!enabled) {
             fill_color = pal.bg;
             text_color = pal.muted;
+            icon_color = pal.muted;
         } else if (danger) {
             fill_color = pal.danger_soft;
             border_color = pal.danger;
             text_color = pal.danger;
+            icon_color = pal.danger;
         } else if (chip && active) {
-            fill_color = pal.accent_soft;
-            border_color = pal.accent;
-            text_color = pal.accent;
+            fill_color = pal.brand_soft;
+            border_color = pal.brand;
+            text_color = pal.brand;
+            icon_color = pal.brand;
         } else if (primary) {
             fill_color = hot ? pal.accent_hover : pal.accent;
             border_color = fill_color;
             text_color = pal.surface;
+            icon_color = pal.surface;
         } else if (hot) {
             fill_color = pal.hover;
-            border_color = pal.border_strong;
+            border_color = pal.brand_border;
         }
         fill(dpy, win, gc, r.x, r.y, r.w, r.h, fill_color);
         frame(dpy, win, gc, r.x, r.y, r.w, r.h, border_color);
         const std::string label = button_label(b);
-        const int icon_w = 14, gap = 6;
+        const int icon_w = 18, gap = 7;
         const int start = r.x + (r.w - icon_w - gap - text_width(body, label)) / 2;
-        draw_button_icon(dpy, win, gc, b, start, r.y + r.h / 2, text_color);
+        draw_button_icon(dpy, win, gc, b, start, r.y + r.h / 2, icon_color,
+                         fill_color);
         text(dpy, win, gc, body, start + icon_w + gap, baseline_for(body, r), label,
              text_color);
         XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
@@ -627,9 +681,16 @@ int run_ui(ModManager& mm) {
             return;
         }
 
-        fill(dpy, win, gc, kMargin, 24, 4, 24, pal.accent);
-        text(dpy, win, gc, heading, kMargin + 14, 42, "PZ Mod Manager", pal.text);
-        text(dpy, win, gc, body, kMargin + 14, 62,
+        const Rect mark{kMargin, 20, 36, 36};
+        fill(dpy, win, gc, mark.x, mark.y, mark.w, mark.h, pal.brand);
+        const std::string monogram = "PZ";
+        text(dpy, win, gc, heading,
+             mark.x + (mark.w - text_width(heading, monogram)) / 2,
+             mark.y + (mark.h + heading->ascent - heading->descent) / 2,
+             monogram, pal.cream);
+        fill(dpy, win, gc, kMargin + 8, 49, 20, 3, pal.accent);
+        text(dpy, win, gc, heading, kMargin + 48, 42, "PZ Mod Manager", pal.text);
+        text(dpy, win, gc, body, kMargin + 48, 62,
              "Project Zomboid Workshop installer", pal.muted);
         draw_button(Btn::Settings);
 
@@ -786,7 +847,7 @@ int run_ui(ModManager& mm) {
 
         fill(dpy, win, gc, kMargin, kActivityY, kCardW, kActivityH, pal.surface);
         frame(dpy, win, gc, kMargin, kActivityY, kCardW, kActivityH, pal.border);
-        text(dpy, win, gc, body, kMargin + 12, kActivityY + 20, "ACTIVITY", pal.muted);
+        text(dpy, win, gc, body, kMargin + 12, kActivityY + 20, "ACTIVITY", pal.brand);
         const int max_lines = 3;
         int start = static_cast<int>(log.size()) - max_lines;
         if (start < 0) start = 0;
@@ -800,7 +861,7 @@ int run_ui(ModManager& mm) {
 
         text(dpy, win, gc, body, kMargin, kStatusY,
              busy ? "Working - steamcmd may take a while" : "Ready",
-             busy ? pal.accent : pal.muted);
+             busy ? pal.accent : pal.brand);
         const std::string status = std::to_string(visible.size()) +
                                    (visible.size() == 1 ? " mod" : " mods");
         text(dpy, win, gc, body, kMargin + kCardW - text_width(body, status), kStatusY,

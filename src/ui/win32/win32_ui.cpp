@@ -6,6 +6,7 @@
 #include <cctype>
 #include <deque>
 #include <exception>
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <string>
@@ -24,12 +25,17 @@ constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_DONE = WM_APP + 2;
 constexpr int kWindowW = 1000, kWindowH = 720;
 constexpr int kRowH = 64;
+constexpr COLORREF kBrand = RGB(44, 99, 69);
+constexpr COLORREF kBrandSoft = RGB(235, 244, 238);
+constexpr COLORREF kBrandBorder = RGB(182, 204, 188);
+constexpr COLORREF kCream = RGB(255, 248, 234);
 
 ModManager* g_mm = nullptr;
 HWND g_hwnd = nullptr;
 HWND g_title = nullptr;
 HWND g_subtitle = nullptr;
-HWND g_accent_bar = nullptr;
+HWND g_brand_mark = nullptr;
+HWND g_brand_line = nullptr;
 HWND g_input = nullptr;
 HWND g_add = nullptr;
 HWND g_filter = nullptr;
@@ -48,12 +54,14 @@ HWND g_clear = nullptr;
 HWND g_details = nullptr;
 HWND g_status = nullptr;
 HWND g_count = nullptr;
+HWND g_activity_label = nullptr;
 
 HWND g_settings_wnd = nullptr;
 HWND g_set_path = nullptr;
 HWND g_set_user = nullptr;
 
 HFONT g_font_title = nullptr;
+HFONT g_font_brand = nullptr;
 HFONT g_font_body = nullptr;
 HFONT g_font_small = nullptr;
 HBRUSH g_bg_brush = nullptr;
@@ -61,6 +69,8 @@ HBRUSH g_card_brush = nullptr;
 HBRUSH g_selected_brush = nullptr;
 HBRUSH g_border_brush = nullptr;
 HBRUSH g_accent_brush = nullptr;
+HBRUSH g_brand_brush = nullptr;
+HBRUSH g_brand_soft_brush = nullptr;
 
 std::thread g_worker;
 std::mutex g_pending_mu;
@@ -125,6 +135,7 @@ void append_log(const std::string& line) {
 
 void set_status(const std::string& s) {
     SetWindowTextW(g_status, to_w(s).c_str());
+    InvalidateRect(g_status, nullptr, TRUE);
 }
 
 std::string read_edit(HWND edit);
@@ -436,99 +447,127 @@ void remove_selected() {
     start_command(cmd);
 }
 
-void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color) {
-    HPEN pen = CreatePen(PS_SOLID, 1, color);
+void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color,
+                      COLORREF background) {
+    const int top = cy - 9, bottom = cy + 9;
+    auto line = [&](int x1, int y1, int x2, int y2) {
+        MoveToEx(hdc, x1, y1, nullptr);
+        LineTo(hdc, x2, y2);
+    };
+
+    LOGBRUSH lb{};
+    lb.lbStyle = BS_SOLID;
+    lb.lbColor = color;
+    HPEN pen = reinterpret_cast<HPEN>(ExtCreatePen(
+        PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb, 0,
+        nullptr));
+    if (!pen) pen = CreatePen(PS_SOLID, 1, color);
+    HBRUSH brush = CreateSolidBrush(color);
     HGDIOBJ old_pen = SelectObject(hdc, pen);
     HGDIOBJ old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    auto fill = [&](std::initializer_list<POINT> points) {
+        std::vector<POINT> shape(points);
+        HGDIOBJ old = SelectObject(hdc, brush);
+        Polygon(hdc, shape.data(), static_cast<int>(shape.size()));
+        SelectObject(hdc, old);
+    };
+    auto fill_rect = [&](int rx, int ry, int rw, int rh) {
+        RECT r{rx, ry, rx + rw, ry + rh};
+        FillRect(hdc, &r, brush);
+    };
+
     switch (id) {
     case ID_ADD:
-        MoveToEx(hdc, x + 7, cy - 7, nullptr);
-        LineTo(hdc, x + 7, cy + 3);
-        MoveToEx(hdc, x + 2, cy - 2, nullptr);
-        LineTo(hdc, x + 7, cy + 3);
-        LineTo(hdc, x + 12, cy - 2);
-        MoveToEx(hdc, x, cy + 8, nullptr);
-        LineTo(hdc, x + 14, cy + 8);
+        line(x + 9, top + 1, x + 9, cy);
+        fill({{x + 3, cy - 1}, {x + 15, cy - 1}, {x + 9, cy + 5}});
+        line(x + 2, cy + 5, x + 2, bottom - 2);
+        line(x + 2, bottom - 2, x + 16, bottom - 2);
+        line(x + 16, bottom - 2, x + 16, cy + 5);
         break;
     case ID_UPDATE:
+        line(x + 2, cy - 5, x + 11, cy - 5);
+        fill({{x + 16, cy - 5}, {x + 11, top}, {x + 11, cy - 1}});
+        line(x + 16, cy + 5, x + 7, cy + 5);
+        fill({{x + 2, cy + 5}, {x + 7, cy + 1}, {x + 7, bottom}});
+        break;
     case ID_UPDATE_ALL:
-        MoveToEx(hdc, x + 7, cy + 7, nullptr);
-        LineTo(hdc, x + 7, cy - 7);
-        MoveToEx(hdc, x + 2, cy - 2, nullptr);
-        LineTo(hdc, x + 7, cy - 7);
-        LineTo(hdc, x + 12, cy - 2);
-        if (id == ID_UPDATE_ALL) {
-            MoveToEx(hdc, x + 1, cy + 7, nullptr);
-            LineTo(hdc, x + 13, cy + 7);
-        }
+        line(x + 2, cy - 6, x + 10, cy - 6);
+        fill({{x + 16, cy - 6}, {x + 11, top}, {x + 11, cy - 2}});
+        line(x + 16, cy + 2, x + 8, cy + 2);
+        fill({{x + 2, cy + 2}, {x + 7, cy - 2}, {x + 7, cy + 6}});
+        line(x + 1, bottom, x + 17, bottom);
         break;
     case ID_REMOVE:
-        Rectangle(hdc, x + 2, cy - 3, x + 12, cy + 6);
-        MoveToEx(hdc, x, cy - 6, nullptr);
-        LineTo(hdc, x + 14, cy - 6);
-        MoveToEx(hdc, x + 5, cy - 8, nullptr);
-        LineTo(hdc, x + 9, cy - 8);
-        MoveToEx(hdc, x + 5, cy, nullptr);
-        LineTo(hdc, x + 5, cy + 4);
-        MoveToEx(hdc, x + 9, cy, nullptr);
-        LineTo(hdc, x + 9, cy + 4);
+        line(x + 1, cy - 6, x + 17, cy - 6);
+        line(x + 6, cy - 8, x + 6, cy - 6);
+        line(x + 6, cy - 8, x + 12, cy - 8);
+        line(x + 12, cy - 8, x + 12, cy - 6);
+        line(x + 3, cy - 4, x + 3, bottom - 2);
+        line(x + 3, bottom - 2, x + 15, bottom - 2);
+        line(x + 15, bottom - 2, x + 15, cy - 4);
+        line(x + 7, cy, x + 7, bottom - 5);
+        line(x + 11, cy, x + 11, bottom - 5);
         break;
     case ID_SELECT_ALL:
-        MoveToEx(hdc, x + 1, cy, nullptr);
-        LineTo(hdc, x + 5, cy + 4);
-        LineTo(hdc, x + 13, cy - 6);
+        line(x + 1, cy - 8, x + 17, cy - 8);
+        line(x + 17, cy - 8, x + 17, cy + 8);
+        line(x + 17, cy + 8, x + 1, cy + 8);
+        line(x + 1, cy + 8, x + 1, cy - 8);
+        line(x + 5, cy, x + 8, cy + 3);
+        line(x + 8, cy + 3, x + 13, cy - 3);
         break;
     case ID_CLEAR:
-        MoveToEx(hdc, x + 2, cy - 6, nullptr);
-        LineTo(hdc, x + 12, cy + 6);
-        MoveToEx(hdc, x + 12, cy - 6, nullptr);
-        LineTo(hdc, x + 2, cy + 6);
+        line(x + 3, cy - 6, x + 15, cy + 6);
+        line(x + 15, cy - 6, x + 3, cy + 6);
         break;
     case ID_SETTINGS:
-        Ellipse(hdc, x + 1, cy - 6, x + 13, cy + 6);
-        MoveToEx(hdc, x + 7, cy - 9, nullptr);
-        LineTo(hdc, x + 7, cy - 6);
-        MoveToEx(hdc, x + 7, cy + 6, nullptr);
-        LineTo(hdc, x + 7, cy + 9);
-        MoveToEx(hdc, x - 2, cy, nullptr);
-        LineTo(hdc, x + 1, cy);
-        MoveToEx(hdc, x + 13, cy, nullptr);
-        LineTo(hdc, x + 16, cy);
+        fill_rect(x + 7, cy - 9, 4, 4);
+        fill_rect(x + 7, cy + 5, 4, 4);
+        fill_rect(x, cy - 2, 4, 4);
+        fill_rect(x + 14, cy - 2, 4, 4);
+        fill_rect(x + 2, cy - 8, 3, 3);
+        fill_rect(x + 13, cy - 8, 3, 3);
+        fill_rect(x + 2, cy + 5, 3, 3);
+        fill_rect(x + 13, cy + 5, 3, 3);
+        {
+            HGDIOBJ no_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+            HGDIOBJ icon_brush = SelectObject(hdc, brush);
+            Ellipse(hdc, x + 3, cy - 6, x + 15, cy + 6);
+            HBRUSH background_brush = CreateSolidBrush(background);
+            SelectObject(hdc, background_brush);
+            Ellipse(hdc, x + 5, cy - 4, x + 13, cy + 4);
+            SelectObject(hdc, icon_brush);
+            SelectObject(hdc, no_pen);
+            DeleteObject(background_brush);
+        }
         break;
     case ID_FILTER_ALL:
     case ID_FILTER_UPDATES:
-        MoveToEx(hdc, x, cy - 7, nullptr);
-        LineTo(hdc, x + 14, cy - 7);
-        LineTo(hdc, x + 9, cy - 1);
-        LineTo(hdc, x + 9, cy + 6);
-        LineTo(hdc, x + 5, cy + 8);
-        LineTo(hdc, x + 5, cy - 1);
-        LineTo(hdc, x, cy - 7);
+        line(x + 1, cy - 8, x + 17, cy - 8);
+        line(x + 17, cy - 8, x + 11, cy - 1);
+        line(x + 11, cy - 1, x + 11, cy + 6);
+        line(x + 11, cy + 6, x + 7, bottom);
+        line(x + 7, bottom, x + 7, cy - 1);
+        line(x + 7, cy - 1, x + 1, cy - 8);
         break;
     case ID_SORT:
-        MoveToEx(hdc, x + 4, cy + 7, nullptr);
-        LineTo(hdc, x + 4, cy - 7);
-        MoveToEx(hdc, x + 1, cy - 3, nullptr);
-        LineTo(hdc, x + 4, cy - 7);
-        LineTo(hdc, x + 7, cy - 3);
-        MoveToEx(hdc, x + 10, cy - 7, nullptr);
-        LineTo(hdc, x + 10, cy + 7);
-        MoveToEx(hdc, x + 7, cy + 3, nullptr);
-        LineTo(hdc, x + 10, cy + 7);
-        LineTo(hdc, x + 13, cy + 3);
+        line(x + 6, bottom, x + 6, cy - 3);
+        fill({{x + 1, cy - 2}, {x + 11, cy - 2}, {x + 6, top}});
+        line(x + 12, top, x + 12, cy + 3);
+        fill({{x + 7, cy + 2}, {x + 17, cy + 2}, {x + 12, bottom}});
         break;
     case ID_CHECK:
-        Arc(hdc, x + 1, cy - 6, x + 13, cy + 7, x + 7, cy + 7, x + 7, cy - 7);
-        MoveToEx(hdc, x + 7, cy - 8, nullptr);
-        LineTo(hdc, x + 7, cy - 4);
-        MoveToEx(hdc, x + 7, cy - 8, nullptr);
-        LineTo(hdc, x + 11, cy - 6);
+        Ellipse(hdc, x + 1, cy - 8, x + 14, cy + 5);
+        line(x + 11, cy + 2, x + 16, cy + 7);
+        line(x + 4, cy - 1, x + 6, cy + 1);
+        line(x + 6, cy + 1, x + 9, cy - 3);
         break;
     default:
         break;
     }
     SelectObject(hdc, old_brush);
     SelectObject(hdc, old_pen);
+    DeleteObject(brush);
     DeleteObject(pen);
 }
 
@@ -541,21 +580,31 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     RECT r = dis->rcItem;
     HBRUSH fill_brush = g_card_brush;
     HBRUSH border_brush = g_border_brush;
+    COLORREF fill_color = RGB(255, 255, 255);
     COLORREF text_color = RGB(31, 38, 46);
+    COLORREF icon_color = kBrand;
     if (disabled) {
         fill_brush = g_bg_brush;
+        fill_color = RGB(246, 247, 249);
         text_color = RGB(108, 118, 132);
+        icon_color = RGB(108, 118, 132);
     } else if (active_chip) {
-        fill_brush = g_selected_brush;
-        border_brush = g_accent_brush;
-        text_color = RGB(224, 100, 43);
+        fill_brush = g_brand_soft_brush;
+        fill_color = kBrandSoft;
+        border_brush = g_brand_brush;
+        text_color = kBrand;
+        icon_color = kBrand;
     } else if (primary) {
         fill_brush = g_accent_brush;
+        fill_color = RGB(224, 100, 43);
         border_brush = g_accent_brush;
         text_color = RGB(255, 255, 255);
+        icon_color = RGB(255, 255, 255);
     } else if (pressed) {
-        fill_brush = g_selected_brush;
-        border_brush = g_accent_brush;
+        fill_brush = g_brand_soft_brush;
+        fill_color = kBrandSoft;
+        border_brush = g_brand_brush;
+        icon_color = kBrand;
     }
     FillRect(dis->hDC, &r, fill_brush);
     FrameRect(dis->hDC, &r, border_brush);
@@ -567,9 +616,10 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     HGDIOBJ old = SelectObject(dis->hDC, g_font_body);
     SIZE size{};
     GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
-    const int start = r.left + (r.right - r.left - 14 - 6 - size.cx) / 2;
-    draw_button_icon(dis->hDC, id, start, (r.top + r.bottom) / 2, text_color);
-    RECT text_rc{start + 20, r.top, r.right - 4, r.bottom};
+    const int start = r.left + (r.right - r.left - 18 - 7 - size.cx) / 2;
+    draw_button_icon(dis->hDC, id, start, (r.top + r.bottom) / 2, icon_color,
+                     fill_color);
+    RECT text_rc{start + 25, r.top, r.right - 4, r.bottom};
     DrawTextW(dis->hDC, label, -1, &text_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dis->hDC, old);
@@ -636,8 +686,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
 
     const int cx = card.right - 30, cy = card.top + kRowH / 2;
     HBRUSH circle = CreateSolidBrush(selected ? RGB(224, 100, 43) : RGB(255, 255, 255));
-    HPEN ring = CreatePen(PS_SOLID, 1,
-                          selected ? RGB(224, 100, 43) : RGB(194, 202, 214));
+    HPEN ring = CreatePen(PS_SOLID, 1, selected ? RGB(224, 100, 43) : kBrandBorder);
     HGDIOBJ old_brush = SelectObject(dis->hDC, circle);
     HGDIOBJ old_pen = SelectObject(dis->hDC, ring);
     Ellipse(dis->hDC, cx - 9, cy - 9, cx + 9, cy + 9);
@@ -778,14 +827,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
         g_hwnd = hwnd;
         {
+            g_brand_mark = CreateWindowW(L"STATIC", L"PZ",
+                WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+                24, 20, 36, 36, hwnd, nullptr, nullptr, nullptr);
+            set_font(g_brand_mark, g_font_brand);
+            g_brand_line = CreateWindowW(L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE, 32, 49, 20, 3, hwnd, nullptr, nullptr, nullptr);
             g_title = CreateWindowW(L"STATIC", L"PZ Mod Manager",
-                WS_CHILD | WS_VISIBLE, 24, 18, 600, 28, hwnd, nullptr, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE, 72, 18, 600, 28, hwnd, nullptr, nullptr, nullptr);
             set_font(g_title, g_font_title);
             g_subtitle = CreateWindowW(L"STATIC", L"Project Zomboid Workshop installer",
-                WS_CHILD | WS_VISIBLE, 24, 46, 600, 18, hwnd, nullptr, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE, 72, 46, 600, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(g_subtitle, g_font_small);
-            g_accent_bar = CreateWindowW(L"STATIC", L"",
-                WS_CHILD | WS_VISIBLE, 24, 24, 4, 24, hwnd, nullptr, nullptr, nullptr);
             g_settings_btn = CreateWindowW(L"BUTTON", L"Settings",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 880, 24, 96, 30, hwnd,
                 (HMENU)ID_SETTINGS, nullptr, nullptr);
@@ -860,9 +913,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE, 600, 562, 376, 18, hwnd, nullptr, nullptr,
                 nullptr);
             set_font(g_details, g_font_small);
-            label = CreateWindowW(L"STATIC", L"ACTIVITY",
+            g_activity_label = CreateWindowW(L"STATIC", L"ACTIVITY",
                 WS_CHILD | WS_VISIBLE, 24, 602, 200, 18, hwnd, nullptr, nullptr, nullptr);
-            set_font(label, g_font_small);
+            set_font(g_activity_label, g_font_small);
             g_log = CreateWindowW(L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
                     WS_BORDER,
@@ -884,12 +937,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 1;
     }
     case WM_CTLCOLORSTATIC: {
-        SetBkMode((HDC)wp, TRANSPARENT);
-        if ((HWND)lp == g_accent_bar) {
+        if ((HWND)lp == g_brand_mark) {
+            SetBkMode((HDC)wp, OPAQUE);
+            SetBkColor((HDC)wp, kBrand);
+            SetTextColor((HDC)wp, kCream);
+            return (LRESULT)g_brand_brush;
+        }
+        if ((HWND)lp == g_brand_line) {
+            SetBkMode((HDC)wp, OPAQUE);
             SetBkColor((HDC)wp, RGB(224, 100, 43));
             return (LRESULT)g_accent_brush;
         }
-        SetTextColor((HDC)wp, RGB(31, 38, 46));
+        SetBkMode((HDC)wp, TRANSPARENT);
+        if ((HWND)lp == g_activity_label) {
+            SetTextColor((HDC)wp, kBrand);
+        } else if ((HWND)lp == g_status) {
+            SetTextColor((HDC)wp, g_busy ? RGB(224, 100, 43) : kBrand);
+        } else {
+            SetTextColor((HDC)wp, RGB(31, 38, 46));
+        }
         return (LRESULT)g_bg_brush;
     }
     case WM_CTLCOLOREDIT: {
@@ -1006,6 +1072,7 @@ int run_ui(ModManager& mm) {
 
     SetProcessDPIAware();
     g_font_title = make_font(18, FW_SEMIBOLD);
+    g_font_brand = make_font(12, FW_BOLD);
     g_font_body = make_font(10, FW_NORMAL);
     g_font_small = make_font(8, FW_NORMAL);
     g_bg_brush = CreateSolidBrush(RGB(246, 247, 249));
@@ -1013,6 +1080,8 @@ int run_ui(ModManager& mm) {
     g_selected_brush = CreateSolidBrush(RGB(255, 242, 234));
     g_border_brush = CreateSolidBrush(RGB(220, 225, 232));
     g_accent_brush = CreateSolidBrush(RGB(224, 100, 43));
+    g_brand_brush = CreateSolidBrush(kBrand);
+    g_brand_soft_brush = CreateSolidBrush(kBrandSoft);
 
     HINSTANCE hi = GetModuleHandleW(nullptr);
     WNDCLASSW wc{};
@@ -1053,11 +1122,14 @@ int run_ui(ModManager& mm) {
     }
 
     clear_icons();
-    for (HWND b : {g_title, g_subtitle, g_input, g_add, g_list, g_log, g_update,
-                   g_remove, g_update_all, g_settings_btn, g_select_all, g_clear,
-                   g_details, g_status, g_count}) {
+    for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input, g_add,
+                   g_list, g_log, g_update, g_remove, g_update_all, g_settings_btn,
+                   g_select_all, g_clear, g_details, g_status, g_count,
+                   g_activity_label}) {
         (void)b;
     }
+    DeleteObject(g_brand_soft_brush);
+    DeleteObject(g_brand_brush);
     DeleteObject(g_accent_brush);
     DeleteObject(g_border_brush);
     DeleteObject(g_selected_brush);
@@ -1065,6 +1137,7 @@ int run_ui(ModManager& mm) {
     DeleteObject(g_bg_brush);
     DeleteObject(g_font_small);
     DeleteObject(g_font_body);
+    DeleteObject(g_font_brand);
     DeleteObject(g_font_title);
     return (int)m.wParam;
 }

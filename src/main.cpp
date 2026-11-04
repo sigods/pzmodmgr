@@ -3,10 +3,14 @@
 #include "ui/ui.hpp"
 #include <iostream>
 
-int main(int argc, char** argv) {
-    pz::Config cfg = pz::default_config();
-    pz::load_config(cfg);
-    pz::ModManager mm(cfg);
+namespace pz {
+// Shared body of both entry points: main() on Linux, wWinMain() on Windows.
+// Windows links pzmodmgr as a GUI-subsystem program (no console window), so the
+// command line is decoded there and handed over as a narrow argv.
+int run_app(int argc, char** argv) {
+    Config cfg = default_config();
+    load_config(cfg);
+    ModManager mm(cfg);
 
     if (argc > 1) {  // CLI mode: pzmodmgr add https://steamcommunity.com/...?id=123
         std::string line;
@@ -14,9 +18,14 @@ int main(int argc, char** argv) {
             if (i > 1) line += ' ';
             line += argv[i];
         }
-        auto r = pz::run_command(mm, line, [](const std::string& s) { std::cout << s << "\n"; });
+        auto r = run_command(mm, line, [](const std::string& s) { std::cout << s << "\n"; });
         std::cout << (r.ok ? "OK: " : "ERROR: ") << r.message << "\n";
         return r.ok ? 0 : 1;
     }
-    return pz::run_ui(mm);   // GUI mode
+    return run_ui(mm);   // GUI mode
 }
+}  // namespace pz
+
+#if !defined(_WIN32)
+int main(int argc, char** argv) { return pz::run_app(argc, argv); }
+#endif
