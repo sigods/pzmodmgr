@@ -1,7 +1,7 @@
 #include "core/commands.hpp"
 #include "core/paths.hpp"
 #include "ui/ui.hpp"
-#include <iostream>
+#include <cstdio>
 
 namespace pz {
 // Shared body of both entry points: main() on Linux, wWinMain() on Windows.
@@ -18,8 +18,11 @@ int run_app(int argc, char** argv) {
             if (i > 1) line += ' ';
             line += argv[i];
         }
-        auto r = run_command(mm, line, [](const std::string& s) { std::cout << s << "\n"; });
-        std::cout << (r.ok ? "OK: " : "ERROR: ") << r.message << "\n";
+        auto r = run_command(mm, line, [](const std::string& s) {
+            std::fputs(s.c_str(), stdout);
+            std::fputc('\n', stdout);
+        });
+        std::fprintf(stdout, "%s%s\n", r.ok ? "OK: " : "ERROR: ", r.message.c_str());
         return r.ok ? 0 : 1;
     }
     return run_ui(mm);   // GUI mode

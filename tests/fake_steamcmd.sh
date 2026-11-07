@@ -48,14 +48,28 @@ mod=FixtureMod
 if [ -n "${FAKE_STEAMCMD_PER_ITEM:-}" ]; then
     mod="FixtureMod$item"
 fi
-mkdir -p "$content/mods/$mod"
-cat > "$content/mods/$mod/mod.info" <<EOF
-id=$mod
-name=Fixture Mod $item
-EOF
-if [ -n "${FAKE_STEAMCMD_VERSION_MIN:-}" ]; then
-    printf 'versionMin=%s\n' "$FAKE_STEAMCMD_VERSION_MIN" >> "$content/mods/$mod/mod.info"
+mods="$mod"
+if [ -n "${FAKE_STEAMCMD_EXTRA_MOD:-}" ]; then
+    mods="$mods $FAKE_STEAMCMD_EXTRA_MOD"
 fi
+for m in $mods; do
+    if [ "$m" = "$mod" ]; then
+        name="Fixture Mod $item"
+    else
+        name="Fixture Mod $item $m"
+    fi
+    mkdir -p "$content/mods/$m"
+    cat > "$content/mods/$m/mod.info" <<EOF
+id=$m
+name=$name
+EOF
+    if [ -n "${FAKE_STEAMCMD_MOD_VERSION:-}" ]; then
+        printf 'modversion=%s\n' "$FAKE_STEAMCMD_MOD_VERSION" >> "$content/mods/$m/mod.info"
+    fi
+    if [ -n "${FAKE_STEAMCMD_VERSION_MIN:-}" ]; then
+        printf 'versionMin=%s\n' "$FAKE_STEAMCMD_VERSION_MIN" >> "$content/mods/$m/mod.info"
+    fi
+done
 
 echo "Success. Downloaded item $item to \"$content\" (0 bytes)"
 echo "Logged in OK."

@@ -5,7 +5,8 @@ function isWorkshop(url) {
     const u = new URL(url);
     const id = u.searchParams.get("id");
     return u.hostname === "steamcommunity.com" &&
-           u.pathname === "/sharedfiles/filedetails/" &&
+           (u.pathname === "/sharedfiles/filedetails/" ||
+            u.pathname === "/workshop/filedetails/") &&
            /^\d+$/.test(id || "");
   } catch (e) {
     return false;
@@ -24,17 +25,23 @@ function notify(title, message) {
 browser.menus.removeAll().then(() => {
   browser.menus.create({
     id: "pzmodmgr-add-page",
-    title: "Add to PZ Mod Manager",
+    title: "Add or update in PZ Mod Manager",
     contexts: ["page"],
     // Firefox only accepts targetUrlPatterns for link/media contexts. A page
     // item must be scoped with documentUrlPatterns.
-    documentUrlPatterns: ["*://steamcommunity.com/sharedfiles/filedetails/*"]
+    documentUrlPatterns: [
+      "*://steamcommunity.com/sharedfiles/filedetails/*",
+      "*://steamcommunity.com/workshop/filedetails/*"
+    ]
   });
   browser.menus.create({
     id: "pzmodmgr-add-link",
-    title: "Add to PZ Mod Manager",
+    title: "Add or update in PZ Mod Manager",
     contexts: ["link"],
-    targetUrlPatterns: ["*://steamcommunity.com/sharedfiles/filedetails/*"]
+    targetUrlPatterns: [
+      "*://steamcommunity.com/sharedfiles/filedetails/*",
+      "*://steamcommunity.com/workshop/filedetails/*"
+    ]
   });
 });
 
@@ -45,7 +52,7 @@ browser.menus.onClicked.addListener((info, tab) => {
     return;
   }
 
-  notify("PZ Mod Manager", "Adding Workshop item...");
+  notify("PZ Mod Manager", "Installing or updating Workshop item...");
   browser.runtime.sendNativeMessage(HOST, { url })
     .then((response) => {
       if (response && response.ok) {

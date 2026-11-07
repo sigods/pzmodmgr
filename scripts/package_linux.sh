@@ -30,6 +30,12 @@ cp "$ROOT/installer/README-Linux.txt" "$STAGE/README.txt"
 cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
 rm -f "$STAGE/README.md" "$STAGE/LICENSE"
 
+# Release binaries still carry their symbol tables. Strip the copies that go
+# into the distribution; the build tree keeps symbols for debugging.
+if command -v strip >/dev/null 2>&1; then
+    strip --strip-unneeded "$STAGE/pzmodmgr" "$STAGE/pzmodmgr_native_host"
+fi
+
 tar -czf "$WORK/payload.tar.gz" -C "$STAGE" .
 sed "s/@VERSION@/$VERSION/g" "$ROOT/installer/linux-installer.sh" > "$WORK/installer.sh"
 cat "$WORK/payload.tar.gz" >> "$WORK/installer.sh"

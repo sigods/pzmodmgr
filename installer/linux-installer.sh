@@ -6,20 +6,26 @@ VERSION="@VERSION@"
 APP="PZ Mod Manager"
 ASSUME_YES=0
 MODE=install
-WANT_DESKTOP=ask
+WANT_DESKTOP=no
 WANT_MENU=yes
 WANT_BROWSERS=yes
+DESKTOP_OPTION=0
+MENU_OPTION=0
+BROWSERS_OPTION=0
 PREFIX=
+ZOMBOID_DIR=${PZMODMGR_ZOMBOID_DIR:-}
+ZOMBOID_DIR_OPTION=0
 
 for arg in "$@"; do
     case "$arg" in
         --yes|-y) ASSUME_YES=1 ;;
-        --desktop) WANT_DESKTOP=yes ;;
-        --no-desktop) WANT_DESKTOP=no ;;
-        --no-menu) WANT_MENU=no ;;
-        --no-browsers) WANT_BROWSERS=no ;;
+        --desktop) WANT_DESKTOP=yes; DESKTOP_OPTION=1 ;;
+        --no-desktop) WANT_DESKTOP=no; DESKTOP_OPTION=1 ;;
+        --no-menu) WANT_MENU=no; MENU_OPTION=1 ;;
+        --no-browsers) WANT_BROWSERS=no; BROWSERS_OPTION=1 ;;
         --uninstall) MODE=uninstall ;;
         --prefix=*) PREFIX=${arg#--prefix=} ;;
+        --zomboid-dir=*) ZOMBOID_DIR=${arg#--zomboid-dir=}; ZOMBOID_DIR_OPTION=1 ;;
         -h|--help) MODE=help ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
@@ -49,6 +55,22 @@ if command -v xdg-user-dir >/dev/null 2>&1; then
     [ -n "$d" ] && DESKTOP_DIR=$d
 fi
 
+config_value() {
+    [ -n "$1" ] && [ -f "$1" ] || return 0
+    sed -n "s/^$2=//p" "$1" | tr -d '\r' | tail -n 1
+}
+
+SOURCE_CONFIG=
+if [ -f "$INSTALL_DIR/config.ini" ]; then
+    SOURCE_CONFIG=$INSTALL_DIR/config.ini
+elif [ -f "$HOME/Zomboid/pzmodmgr/config.ini" ]; then
+    SOURCE_CONFIG=$HOME/Zomboid/pzmodmgr/config.ini
+fi
+if [ -z "$ZOMBOID_DIR" ] && [ -n "$SOURCE_CONFIG" ]; then
+    ZOMBOID_DIR=$(config_value "$SOURCE_CONFIG" zomboid_dir)
+fi
+[ -n "$ZOMBOID_DIR" ] || ZOMBOID_DIR=$HOME/Zomboid
+
 case "$MODE" in
     help)
         cat <<EOF
@@ -56,9 +78,11 @@ $APP $VERSION installer
 
   --yes            accept defaults
   --desktop        create a desktop shortcut too
+  --no-desktop     do not create a desktop shortcut
   --no-menu        do not add the application-menu entry
   --no-browsers    do not register Firefox/Chrome native hosts
   --prefix=DIR     install elsewhere
+  --zomboid-dir=DIR  Zomboid cache folder (default: ~/Zomboid)
   --uninstall      remove the installed copy
 EOF
         exit 0
@@ -97,9 +121,34 @@ if [ "$ASSUME_YES" = 0 ]; then
     say "Mods are installed into ~/Zomboid/mods. No sudo is required."
 fi
 
-if ! ask "Create a desktop shortcut? [y/N]" no; then WANT_DESKTOP=no; else WANT_DESKTOP=yes; fi
-if ! ask "Add PZ Mod Manager to the application menu? [Y/n]" yes; then WANT_MENU=no; fi
-if ! ask "Register Firefox and Chrome add-on hosts? [Y/n]" yes; then WANT_BROWSERS=no; fi
+# Explicit options always win; --yes only accepts the defaults. This matters
+# for unattended installs such as --yes --no-browsers --no-menu.
+if [ "$DESKTOP_OPTION" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
+    if ask "Create a desktop shortcut? [y/N]" no; then WANT_DESKTOP=yes; fi
+fi
+if [ "$MENU_OPTION" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
+    if ! ask "Add PZ Mod Manager to the application menu? [Y/n]" yes; then WANT_MENU=no; fi
+fi
+if [ "$BROWSERS_OPTION" = 0 ] && [ "$ASSUME_YES" = 0 ]; then
+    if ! ask "Register Firefox and Chrome add-on hosts? [Y/n]" yes; then WANT_BROWSERS=no; fi
+fi
+
+if [ "$ASSUME_YES" = 0 ] && [ "$ZOMBOID_DIR_OPTION" = 0 ] && [ -z "${PZMODMGR_ZOMBOID_DIR:-}" ]; then
+    say "Zomboid cache folder: $ZOMBOID_DIR"
+    printf 'Change it? [Enter to keep]: '
+    if read -r _zomboid; then
+        [ -n "$_zomboid" ] && ZOMBOID_DIR=$_zomboid
+    fi
+fi
+case "$ZOMBOID_DIR" in
+    "~") ZOMBOID_DIR=$HOME ;;
+    "~/"*) ZOMBOID_DIR=$HOME/${ZOMBOID_DIR#~/} ;;
+esac
+case "$ZOMBOID_DIR" in
+    /*) ;;
+    *) echo "error: Zomboid cache folder must be an absolute path: $ZOMBOID_DIR" >&2; exit 2 ;;
+esac
+[ "$ZOMBOID_DIR" != / ] || { echo "error: refusing to use / as the Zomboid cache folder" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/pzmodmgr.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
@@ -110,10 +159,20 @@ tail -n +"$PAYLOAD_LINE" "$0" | tar -xzf - -C "$TMP"
 say "Installing files..."
 mkdir -p "$INSTALL_DIR"
 cp -R "$TMP"/. "$INSTALL_DIR"/
-mkdir -p "$HOME/Zomboid/pzmodmgr"
-if [ ! -f "$HOME/Zomboid/pzmodmgr/config.ini" ]; then
-    printf 'steamcmd_exe=\nsteam_user=anonymous\n' > "$HOME/Zomboid/pzmodmgr/config.ini"
-fi
+
+steamcmd_exe=$(config_value "$SOURCE_CONFIG" steamcmd_exe)
+steam_user=$(config_value "$SOURCE_CONFIG" steam_user)
+dark_mode=$(config_value "$SOURCE_CONFIG" dark_mode)
+[ -n "$steam_user" ] || steam_user=anonymous
+case "$dark_mode" in
+    1|on|true|yes|dark) dark_mode=1 ;;
+    *) dark_mode=0 ;;
+esac
+config_tmp=$(mktemp "$INSTALL_DIR/.config.ini.XXXXXX")
+printf 'steamcmd_exe=%s\nsteam_user=%s\nzomboid_dir=%s\ndark_mode=%s\n' \
+    "$steamcmd_exe" "$steam_user" "$ZOMBOID_DIR" "$dark_mode" > "$config_tmp"
+chmod 644 "$config_tmp"
+mv -f "$config_tmp" "$INSTALL_DIR/config.ini"
 chmod 755 "$INSTALL_DIR/pzmodmgr" "$INSTALL_DIR/pzmodmgr_native_host"
 mkdir -p "$BIN_DIR"
 ln -sfn "$INSTALL_DIR/pzmodmgr" "$BIN_DIR/pzmodmgr"
@@ -203,9 +262,11 @@ chmod 755 "$INSTALL_DIR/uninstall.sh"
 
 say ""
 say "Installed $APP $VERSION to $INSTALL_DIR"
+say "Zomboid cache folder: $ZOMBOID_DIR"
+say "Config: $INSTALL_DIR/config.ini"
 say "Launch: $BIN_DIR/pzmodmgr"
 say "Uninstall: $INSTALL_DIR/uninstall.sh"
-say "No password is stored. The first add downloads steamcmd into ~/Zomboid/pzmodmgr/steamcmd."
+say "No password is stored. The first add downloads steamcmd into the Zomboid folder."
 exit 0
 
 __PZMODMGR_PAYLOAD__

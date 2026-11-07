@@ -1,13 +1,38 @@
 #include "core/mod_info.hpp"
+#include "core/text.hpp"
 #include <algorithm>
 #include <charconv>
 #include <cctype>
-#include <fstream>
 #include <system_error>
 #include <vector>
 
 namespace pz {
 namespace {
+
+std::string trim_copy(std::string value) {
+    const auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return {};
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+std::vector<std::string> parse_required_ids(const std::string& value) {
+    std::vector<std::string> ids;
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t separator = value.find_first_of(",;", start);
+        std::string id = trim_copy(value.substr(
+            start, separator == std::string::npos ? separator : separator - start));
+        while (!id.empty() && (id.front() == '\\' || id.front() == '/')) id.erase(0, 1);
+        if (id.size() >= 2 && id.front() == '"' && id.back() == '"')
+            id = id.substr(1, id.size() - 2);
+        if (!id.empty() && std::find(ids.begin(), ids.end(), id) == ids.end())
+            ids.push_back(id);
+        if (separator == std::string::npos) break;
+        start = separator + 1;
+    }
+    return ids;
+}
 
 // B42 mods may keep their metadata in a version subfolder, for example
 // mods/HorseMod/42/mod.info. Prefer the highest numeric version.
@@ -20,8 +45,8 @@ int version_rank(const std::string& name) {
 }
 
 fs::path resolve_icon(const fs::path& root, const fs::path& info_dir, const std::string& value) {
-    std::error_code ec;
-    auto regular = [&](const fs::path& p) {
+    auto regular = [](const fs::path& p) {
+        std::error_code ec;
         return fs::is_regular_file(p, ec);
     };
 
@@ -33,39 +58,38 @@ fs::path resolve_icon(const fs::path& root, const fs::path& info_dir, const std:
         }
     }
 
-    std::vector<fs::path> icons;
+    // Only the canonical icon.png is an implicit icon. Do not glob icon*:
+    // files such as icon_old.png or icon_alt.png are not the active icon.
+    for (const auto& base : {info_dir, root, root / "common"}) {
+        const fs::path icon = base / "icon.png";
+        if (regular(icon)) return icon;
+    }
+
+    // Some Workshop mods only ship a preview/poster image. Keep the explicit
+    // icon= path above, but let these common names act as a fallback.
     for (const auto& base : {info_dir, root, root / "common"}) {
         const fs::path poster = base / "poster.png";
-        if (regular(poster)) icons.push_back(poster);
-        fs::directory_iterator it(base, ec);
-        if (ec) continue;
-        for (const auto& e : it) {
-            const std::string name = e.path().filename().string();
-            if (name.size() >= 4 && name.compare(0, 4, "icon") == 0 &&
-                e.path().extension() == ".png" && regular(e.path()))
-                icons.push_back(e.path());
-        }
+        if (regular(poster)) return poster;
     }
-    if (icons.empty()) return {};
-    std::sort(icons.begin(), icons.end());
-    return icons.front();
+    for (const auto& base : {info_dir, root, root / "common"}) {
+        const fs::path preview = base / "preview.png";
+        if (regular(preview)) return preview;
+    }
+    return {};
 }
 
 // Reads just versionMin/versionMax, without resolving icons. Used while
 // choosing a version folder and to gate downloads against the game build.
 bool info_supports_game(const fs::path& info_dir, const std::string& game_version) {
     if (game_version.empty()) return true;
-    std::ifstream in(info_dir / "mod.info");
     ModInfo bounds;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+    for_each_line(info_dir / "mod.info", [&](const std::string& line) {
         const auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
+        if (eq == std::string::npos) return;
         const auto k = line.substr(0, eq);
         if (k == "versionMin") bounds.version_min = line.substr(eq + 1);
         else if (k == "versionMax") bounds.version_max = line.substr(eq + 1);
-    }
+    });
     return supports_game_version(bounds, game_version);
 }
 
@@ -123,24 +147,26 @@ std::optional<ModInfo> read_mod_info(const fs::path& dir) {
 std::optional<ModInfo> read_mod_info(const fs::path& dir, const std::string& game_version) {
     const fs::path info_dir = mod_info_dir(dir, game_version);
     if (info_dir.empty()) return std::nullopt;
-    std::ifstream in(info_dir / "mod.info");
-    if (!in) return std::nullopt;
     ModInfo m;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        auto k = line.substr(0, eq);
-        auto v = line.substr(eq + 1);
-        if (k == "id") m.id = v;
-        else if (k == "name") m.name = v;
-        else if (k == "author") m.author = v;
-        else if (k == "modversion") m.mod_version = v;
-        else if (k == "versionMin") m.version_min = v;
-        else if (k == "versionMax") m.version_max = v;
-        else if (k == "icon") m.icon = v;
-    }
+    if (!for_each_line(info_dir / "mod.info", [&](const std::string& line) {
+            auto eq = line.find('=');
+            if (eq == std::string::npos) return;
+            auto k = line.substr(0, eq);
+            auto v = line.substr(eq + 1);
+            if (k == "id") m.id = v;
+            else if (k == "name") m.name = v;
+            else if (k == "author") m.author = v;
+            else if (k == "modversion") m.mod_version = v;
+            else if (k == "versionMin") m.version_min = v;
+            else if (k == "versionMax") m.version_max = v;
+            else if (k == "require" || k == "requires") {
+                for (const auto& required : parse_required_ids(v)) {
+                    if (std::find(m.required_ids.begin(), m.required_ids.end(), required) ==
+                        m.required_ids.end())
+                        m.required_ids.push_back(required);
+                }
+            } else if (k == "icon") m.icon = v;
+        })) return std::nullopt;
     if (!m.icon.empty()) {
         const std::string value = m.icon.string();
         m.icon = resolve_icon(dir, info_dir, value);
@@ -148,29 +174,6 @@ std::optional<ModInfo> read_mod_info(const fs::path& dir, const std::string& gam
         m.icon = resolve_icon(dir, info_dir, {});
     }
     return m;
-}
-
-int compare_versions(const std::string& a, const std::string& b) {
-    std::size_t ai = 0, bi = 0;
-    while (ai < a.size() && !std::isdigit(static_cast<unsigned char>(a[ai]))) ++ai;
-    while (bi < b.size() && !std::isdigit(static_cast<unsigned char>(b[bi]))) ++bi;
-    for (;;) {
-        unsigned long av = 0, bv = 0;
-        bool a_part = false, b_part = false;
-        while (ai < a.size() && std::isdigit(static_cast<unsigned char>(a[ai]))) {
-            a_part = true;
-            av = av * 10 + static_cast<unsigned long>(a[ai++] - '0');
-        }
-        while (bi < b.size() && std::isdigit(static_cast<unsigned char>(b[bi]))) {
-            b_part = true;
-            bv = bv * 10 + static_cast<unsigned long>(b[bi++] - '0');
-        }
-        if (av != bv) return av < bv ? -1 : 1;
-        if (!a_part && !b_part) return 0;
-        while (ai < a.size() && a[ai] == '.') ++ai;
-        while (bi < b.size() && b[bi] == '.') ++bi;
-        if (ai >= a.size() && bi >= b.size()) return 0;
-    }
 }
 
 namespace {
@@ -202,5 +205,12 @@ bool supports_game_version(const ModInfo& info, const std::string& game_version)
         return game >= minimum && game <= maximum;
     if (minimum >= 0) return game == minimum;
     return game == maximum;
+}
+
+std::string version_range(const ModInfo& info) {
+    if (info.version_min.empty() && info.version_max.empty()) return {};
+    if (info.version_max.empty()) return "PZ " + info.version_min + "+";
+    if (info.version_min.empty()) return "PZ up to " + info.version_max;
+    return "PZ " + info.version_min + "-" + info.version_max;
 }
 }  // namespace pz

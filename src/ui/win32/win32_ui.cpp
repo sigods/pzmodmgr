@@ -1,9 +1,11 @@
 #include "ui/ui.hpp"
 #include "ui/mod_icon.hpp"
+#include "ui/glyphs.hpp"
 #include "core/commands.hpp"
 #include <windows.h>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <initializer_list>
@@ -19,16 +21,24 @@ constexpr int ID_INPUT = 101, ID_ADD = 102, ID_LIST = 103, ID_LOG = 104;
 constexpr int ID_UPDATE = 105, ID_REMOVE = 106, ID_UPDATE_ALL = 107, ID_SETTINGS = 108;
 constexpr int ID_SELECT_ALL = 109, ID_CLEAR = 110;
 constexpr int ID_FILTER = 111, ID_FILTER_ALL = 112, ID_FILTER_UPDATES = 113;
-constexpr int ID_SORT = 114, ID_CHECK = 115;
-constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202;
+constexpr int ID_SORT = 114, ID_CHECK = 115, ID_COPY = 116, ID_ENABLE = 117;
+constexpr int ID_SHARE_SERVER = 118;
+constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_DARK = 203, ID_SET_AUTO = 204;
+constexpr int ID_TGT_LIST = 301, ID_TGT_ENABLE = 302, ID_TGT_DISABLE = 303;
+constexpr int ID_TGT_COPY = 304, ID_TGT_CLOSE = 305, ID_TGT_COPY_NAMES = 306;
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_DONE = WM_APP + 2;
-constexpr int kWindowW = 1000, kWindowH = 720;
+constexpr UINT WM_APP_RELOAD = WM_APP + 3;
+constexpr UINT_PTR kAutoCheckTimer = 1;
+constexpr int kWindowW = 920, kWindowH = 720;
 constexpr int kRowH = 64;
-constexpr COLORREF kBrand = RGB(44, 99, 69);
-constexpr COLORREF kBrandSoft = RGB(235, 244, 238);
-constexpr COLORREF kBrandBorder = RGB(182, 204, 188);
-constexpr COLORREF kCream = RGB(255, 248, 234);
+struct Theme {
+    COLORREF bg, surface, field, border, border_strong, text, muted;
+    COLORREF accent, accent_hover, accent_soft, danger, danger_soft;
+    COLORREF brand, brand_soft, brand_border, cream, hover, success, on_accent;
+};
+Theme g_theme{};
+bool g_dark_mode = false;
 
 ModManager* g_mm = nullptr;
 HWND g_hwnd = nullptr;
@@ -44,21 +54,39 @@ HWND g_filter_updates = nullptr;
 HWND g_sort = nullptr;
 HWND g_check = nullptr;
 HWND g_list = nullptr;
+HWND g_empty = nullptr;
+WNDPROC g_list_old_proc = nullptr;
 HWND g_log = nullptr;
 HWND g_update = nullptr;
 HWND g_remove = nullptr;
 HWND g_update_all = nullptr;
 HWND g_settings_btn = nullptr;
+HWND g_enable_btn = nullptr;
+HWND g_share_server_btn = nullptr;
 HWND g_select_all = nullptr;
 HWND g_clear = nullptr;
+HWND g_copy = nullptr;
 HWND g_details = nullptr;
 HWND g_status = nullptr;
 HWND g_count = nullptr;
 HWND g_activity_label = nullptr;
 
 HWND g_settings_wnd = nullptr;
+HWND g_set_zomboid = nullptr;
 HWND g_set_path = nullptr;
 HWND g_set_user = nullptr;
+HWND g_set_dark = nullptr;
+HWND g_set_auto = nullptr;
+HWND g_targets_wnd = nullptr;
+HWND g_tgt_list = nullptr;
+HWND g_tgt_status = nullptr;
+HWND g_tgt_copy = nullptr;
+HWND g_tgt_copy_names = nullptr;
+std::vector<ActivationTarget> g_targets;
+std::vector<std::vector<std::string>> g_row_mod_ids;
+std::vector<char> g_row_enabled;
+std::vector<ActivationTarget> g_activation;
+std::vector<std::string> g_target_mod_ids;
 
 HFONT g_font_title = nullptr;
 HFONT g_font_brand = nullptr;
@@ -66,6 +94,7 @@ HFONT g_font_body = nullptr;
 HFONT g_font_small = nullptr;
 HBRUSH g_bg_brush = nullptr;
 HBRUSH g_card_brush = nullptr;
+HBRUSH g_field_brush = nullptr;
 HBRUSH g_selected_brush = nullptr;
 HBRUSH g_border_brush = nullptr;
 HBRUSH g_accent_brush = nullptr;
@@ -73,18 +102,33 @@ HBRUSH g_brand_brush = nullptr;
 HBRUSH g_brand_soft_brush = nullptr;
 
 std::thread g_worker;
+std::thread g_watch_worker;
+HANDLE g_watch_change = nullptr;
+HANDLE g_watch_stop = nullptr;
 std::mutex g_pending_mu;
 std::deque<std::string> g_pending;
 std::vector<std::wstring> g_row_names;
 std::vector<std::wstring> g_row_meta;
 std::vector<std::string> g_row_folders;
+std::vector<std::string> g_row_icon_paths;
 std::vector<std::uint64_t> g_row_ids;
 std::vector<char> g_row_updates;
 std::vector<std::uint64_t> g_selected_ids;
+std::vector<std::string> g_selected_folders;
 bool g_only_updates = false;
 int g_sort_mode = 0;
 std::map<std::string, HBITMAP> g_icons;
+std::map<std::string, std::optional<ModInfo>> g_info_cache;
+std::string g_dependency_warning;
+std::string g_dependency_signature;
 bool g_busy = false;
+bool g_reload_pending = false;
+
+struct EditPlaceholder {
+    WNDPROC old_proc = nullptr;
+    const wchar_t* text = nullptr;
+};
+std::map<HWND, EditPlaceholder> g_edit_placeholders;
 
 std::wstring to_w(const std::string& s) {
     if (s.empty()) return {};
@@ -104,9 +148,129 @@ std::string to_u8(const std::wstring& w) {
     return s;
 }
 
-std::string lowercase(std::string s) {
-    for (char& c : s) c = (char)std::tolower((unsigned char)c);
-    return s;
+void stop_watcher() {
+    if (g_watch_stop) SetEvent(g_watch_stop);
+    if (g_watch_worker.joinable()) g_watch_worker.join();
+    if (g_watch_change) {
+        FindCloseChangeNotification(g_watch_change);
+        g_watch_change = nullptr;
+    }
+    if (g_watch_stop) {
+        CloseHandle(g_watch_stop);
+        g_watch_stop = nullptr;
+    }
+}
+
+bool start_watcher(const fs::path& dir) {
+    stop_watcher();
+    g_watch_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_watch_stop) return false;
+    const std::wstring path = to_w(dir.string());
+    g_watch_change = FindFirstChangeNotificationW(
+        path.c_str(), FALSE,
+        FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME |
+            FILE_NOTIFY_CHANGE_SIZE);
+    if (g_watch_change == INVALID_HANDLE_VALUE) {
+        g_watch_change = nullptr;
+        CloseHandle(g_watch_stop);
+        g_watch_stop = nullptr;
+        return false;
+    }
+    try {
+        g_watch_worker = std::thread([] {
+            HANDLE handles[2] = {g_watch_change, g_watch_stop};
+            for (;;) {
+                const DWORD result =
+                    WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+                if (result == WAIT_OBJECT_0 + 1) break;
+                if (result != WAIT_OBJECT_0) break;
+                if (g_hwnd) PostMessageW(g_hwnd, WM_APP_RELOAD, 0, 0);
+                if (!FindNextChangeNotification(g_watch_change)) break;
+            }
+        });
+    } catch (...) {
+        stop_watcher();
+        return false;
+    }
+    return true;
+}
+
+Theme make_theme(bool dark) {
+    Theme t;
+    if (!dark) {
+        t.bg = RGB(246, 247, 249);
+        t.surface = RGB(255, 255, 255);
+        t.field = RGB(255, 255, 255);
+        t.border = RGB(220, 225, 232);
+        t.border_strong = RGB(194, 202, 214);
+        t.text = RGB(31, 38, 46);
+        t.muted = RGB(108, 118, 132);
+        t.accent = RGB(224, 100, 43);
+        t.accent_hover = RGB(198, 82, 30);
+        t.accent_soft = RGB(255, 242, 234);
+        t.danger = RGB(190, 55, 55);
+        t.danger_soft = RGB(253, 237, 237);
+        t.brand = RGB(44, 99, 69);
+        t.brand_soft = RGB(235, 244, 238);
+        t.brand_border = RGB(182, 204, 188);
+        t.cream = RGB(255, 248, 234);
+        t.hover = RGB(244, 248, 245);
+        t.success = RGB(36, 122, 80);
+        t.on_accent = RGB(255, 255, 255);
+    } else {
+        t.bg = RGB(18, 21, 24);
+        t.surface = RGB(28, 32, 36);
+        t.field = RGB(22, 26, 30);
+        t.border = RGB(58, 64, 70);
+        t.border_strong = RGB(78, 86, 94);
+        t.text = RGB(232, 236, 240);
+        t.muted = RGB(154, 163, 173);
+        t.accent = RGB(232, 116, 58);
+        t.accent_hover = RGB(245, 132, 72);
+        t.accent_soft = RGB(58, 36, 27);
+        t.danger = RGB(230, 100, 100);
+        t.danger_soft = RGB(52, 28, 30);
+        t.brand = RGB(96, 180, 130);
+        t.brand_soft = RGB(26, 46, 36);
+        t.brand_border = RGB(64, 110, 84);
+        t.cream = RGB(255, 248, 234);
+        t.hover = RGB(36, 44, 40);
+        t.success = RGB(96, 180, 130);
+        t.on_accent = RGB(255, 248, 234);
+    }
+    return t;
+}
+
+void destroy_theme_brushes() {
+    for (HBRUSH* brush : {&g_bg_brush, &g_card_brush, &g_field_brush,
+                          &g_selected_brush, &g_border_brush, &g_accent_brush,
+                          &g_brand_brush, &g_brand_soft_brush}) {
+        if (*brush) DeleteObject(*brush);
+        *brush = nullptr;
+    }
+}
+
+void create_theme_brushes() {
+    g_bg_brush = CreateSolidBrush(g_theme.bg);
+    g_card_brush = CreateSolidBrush(g_theme.surface);
+    g_field_brush = CreateSolidBrush(g_theme.field);
+    g_selected_brush = CreateSolidBrush(g_theme.accent_soft);
+    g_border_brush = CreateSolidBrush(g_theme.border);
+    g_accent_brush = CreateSolidBrush(g_theme.accent);
+    g_brand_brush = CreateSolidBrush(g_theme.brand);
+    g_brand_soft_brush = CreateSolidBrush(g_theme.brand_soft);
+}
+
+void apply_theme(bool dark, HWND hwnd) {
+    g_dark_mode = dark;
+    g_theme = make_theme(dark);
+    destroy_theme_brushes();
+    create_theme_brushes();
+    if (hwnd) {
+        SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_bg_brush);
+        RedrawWindow(hwnd, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
 }
 
 void set_font(HWND h, HFONT font) {
@@ -138,17 +302,35 @@ void set_status(const std::string& s) {
     InvalidateRect(g_status, nullptr, TRUE);
 }
 
+void refresh_dependency_warning() {
+    if (!g_mm) return;
+    const auto notice = dependency_notice(g_mm->missing_requirements());
+    if (notice.signature != g_dependency_signature) {
+        if (notice.messages.empty()) {
+            if (!g_dependency_signature.empty()) append_log("required mods satisfied");
+        } else {
+            for (const auto& line : notice.messages) append_log(line);
+        }
+        g_dependency_signature = notice.signature;
+    }
+    g_dependency_warning = notice.status;
+}
+
 std::string read_edit(HWND edit);
 
 void update_actions() {
-    const bool has = !g_selected_ids.empty();
+    const bool has_ids = !g_selected_ids.empty();
+    const bool has_any = has_ids || !g_selected_folders.empty();
     EnableWindow(g_add, !g_busy);
     EnableWindow(g_update_all, !g_busy);
     EnableWindow(g_settings_btn, !g_busy);
+    EnableWindow(g_share_server_btn, !g_busy);
     EnableWindow(g_select_all, !g_busy && !g_row_ids.empty());
-    EnableWindow(g_clear, !g_busy && has);
-    EnableWindow(g_update, !g_busy && has);
-    EnableWindow(g_remove, !g_busy && has);
+    EnableWindow(g_clear, !g_busy && has_any);
+    EnableWindow(g_copy, !g_busy && has_ids);
+    EnableWindow(g_enable_btn, !g_busy && has_any);
+    EnableWindow(g_update, !g_busy && has_ids);
+    EnableWindow(g_remove, !g_busy && has_ids);
     EnableWindow(g_filter, !g_busy);
     EnableWindow(g_filter_all, !g_busy);
     EnableWindow(g_filter_updates, !g_busy);
@@ -161,7 +343,8 @@ std::vector<std::uint64_t> selected_ids() {
     int count = (int)SendMessageW(g_list, LB_GETSELCOUNT, 0, 0);
     if (count < 0) {
         int sel = (int)SendMessageW(g_list, LB_GETCURSEL, 0, 0);
-        if (sel >= 0 && sel < (int)g_row_ids.size()) ids.push_back(g_row_ids[(std::size_t)sel]);
+        if (sel >= 0 && sel < (int)g_row_ids.size() && g_row_ids[(std::size_t)sel] != 0)
+            ids.push_back(g_row_ids[(std::size_t)sel]);
         return ids;
     }
     if (count == 0) return ids;
@@ -172,19 +355,45 @@ std::vector<std::uint64_t> selected_ids() {
         int index = rows[(std::size_t)i];
         if (index < 0 || index >= (int)g_row_ids.size()) continue;
         auto id = g_row_ids[(std::size_t)index];
+        if (id == 0) continue;
         if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
     }
     return ids;
 }
 
+std::vector<std::string> selected_folders() {
+    std::vector<std::string> folders;
+    int count = (int)SendMessageW(g_list, LB_GETSELCOUNT, 0, 0);
+    if (count <= 0) {
+        const int sel = (int)SendMessageW(g_list, LB_GETCURSEL, 0, 0);
+        if (sel >= 0 && sel < (int)g_row_ids.size() && g_row_ids[(std::size_t)sel] == 0 &&
+            sel < (int)g_row_folders.size())
+            folders.push_back(g_row_folders[(std::size_t)sel]);
+        return folders;
+    }
+    std::vector<int> rows((std::size_t)count);
+    const int got = (int)SendMessageW(g_list, LB_GETSELITEMS, count, (LPARAM)rows.data());
+    for (int i = 0; i < got; ++i) {
+        const int index = rows[(std::size_t)i];
+        if (index < 0 || index >= (int)g_row_ids.size() || index >= (int)g_row_folders.size())
+            continue;
+        if (g_row_ids[(std::size_t)index] != 0) continue;
+        const auto& folder = g_row_folders[(std::size_t)index];
+        if (std::find(folders.begin(), folders.end(), folder) == folders.end())
+            folders.push_back(folder);
+    }
+    return folders;
+}
+
 void set_details() {
-    if (g_selected_ids.empty()) {
+    const std::size_t total = g_selected_ids.size() + g_selected_folders.size();
+    if (total == 0) {
         SetWindowTextW(g_details, L"No selection");
         return;
     }
-    if (g_selected_ids.size() > 1) {
+    if (total > 1) {
         SetWindowTextW(g_details,
-            (to_w(std::to_string(g_selected_ids.size())) + L" selected").c_str());
+            (to_w(std::to_string(total)) + L" selected").c_str());
         return;
     }
     int index = -1;
@@ -210,17 +419,20 @@ HBITMAP load_icon_bitmap(const fs::path& path) {
     if (!bitmap || !bits) return nullptr;
 
     auto* pixels = static_cast<std::uint8_t*>(bits);
+    const int bg_r = GetRValue(g_theme.surface);
+    const int bg_g = GetGValue(g_theme.surface);
+    const int bg_b = GetBValue(g_theme.surface);
     for (int y = 0; y < 48; ++y) {
         for (int x = 0; x < 48; ++x) {
             const std::size_t src = (static_cast<std::size_t>(y) * 48 + x) * 4;
             const std::size_t dst = src;
             const int a = icon.rgba[src + 3];
             pixels[dst + 0] = static_cast<std::uint8_t>(
-                (icon.rgba[src + 2] * a + 255 * (255 - a)) / 255);
+                (icon.rgba[src + 2] * a + bg_b * (255 - a)) / 255);
             pixels[dst + 1] = static_cast<std::uint8_t>(
-                (icon.rgba[src + 1] * a + 255 * (255 - a)) / 255);
+                (icon.rgba[src + 1] * a + bg_g * (255 - a)) / 255);
             pixels[dst + 2] = static_cast<std::uint8_t>(
-                (icon.rgba[src + 0] * a + 255 * (255 - a)) / 255);
+                (icon.rgba[src + 0] * a + bg_r * (255 - a)) / 255);
             pixels[dst + 3] = 255;
         }
     }
@@ -233,6 +445,14 @@ void clear_icons() {
         if (bitmap) DeleteObject(bitmap);
     }
     g_icons.clear();
+    g_info_cache.clear();
+}
+
+const std::optional<ModInfo>& info_for_cached(const std::string& folder) {
+    auto it = g_info_cache.find(folder);
+    if (it == g_info_cache.end())
+        it = g_info_cache.emplace(folder, g_mm->info_for(folder)).first;
+    return it->second;
 }
 
 void refresh_list() {
@@ -242,61 +462,41 @@ void refresh_list() {
     g_row_meta.clear();
     g_row_folders.clear();
     g_row_updates.clear();
-    clear_icons();
+    g_row_icon_paths.clear();
+    g_row_mod_ids.clear();
+    g_row_enabled.clear();
+    g_activation = g_mm->activation_targets();
 
-    const std::string needle = lowercase(read_edit(g_filter));
-    auto visible = g_mm->list();
-    visible.erase(std::remove_if(visible.begin(), visible.end(),
-        [&](const InstalledMod& m) {
-            if (g_only_updates && !g_mm->update_available(m.workshop_id)) return true;
-            if (needle.empty()) return false;
-            std::string haystack = m.name + " " + m.folder;
-            if (const auto info = g_mm->info_for(m.folder))
-                haystack += " " + info->author + " " + info->mod_version;
-            return lowercase(haystack).find(needle) == std::string::npos;
-        }), visible.end());
-
-    if (g_sort_mode == 0) {
-        std::stable_sort(visible.begin(), visible.end(),
-            [](const InstalledMod& a, const InstalledMod& b) {
-                return lowercase(a.name) < lowercase(b.name);
-            });
-    } else {
-        std::stable_sort(visible.begin(), visible.end(),
-            [](const InstalledMod& a, const InstalledMod& b) {
-                if (a.time_updated != b.time_updated)
-                    return a.time_updated > b.time_updated;
-                return lowercase(a.name) < lowercase(b.name);
-            });
-    }
+    const std::string filter = read_edit(g_filter);
+    auto visible = visible_mods(g_mm->list_all(), filter, g_only_updates, g_sort_mode,
+        [&](std::uint64_t id) { return g_mm->update_available(id); });
 
     for (const auto& m : visible) {
-        const auto info = g_mm->info_for(m.folder);
+        const auto& info = info_for_cached(m.folders.front());
         const std::string title = (info && !info->name.empty()) ? info->name
-            : (m.name.empty() ? m.folder : m.name);
-        std::string meta;
-        if (info) {
-            if (!info->author.empty()) meta += info->author + "  |  ";
-            if (!info->mod_version.empty()) meta += "v" + info->mod_version + "  |  ";
+            : (m.name.empty() ? m.folders.front() : m.name);
+        std::vector<std::string> mod_ids;
+        for (const auto& folder : m.folders) {
+            const auto& folder_meta = info_for_cached(folder);
+            if (!folder_meta || folder_meta->id.empty()) continue;
+            if (std::find(mod_ids.begin(), mod_ids.end(), folder_meta->id) ==
+                mod_ids.end())
+                mod_ids.push_back(folder_meta->id);
         }
-        meta += m.folder;
-        if (info && !supports_game_version(*info, g_mm->game_version())) {
-            if (!info->version_min.empty() && !info->version_max.empty())
-                meta += "  |  PZ " + info->version_min + "-" + info->version_max;
-            else if (!info->version_min.empty())
-                meta += "  |  PZ " + info->version_min + "+";
-            else if (!info->version_max.empty())
-                meta += "  |  PZ up to " + info->version_max;
-        }
+        const std::string on_targets = enabled_in(g_activation, mod_ids);
+        const std::string meta = mod_meta(
+            m, info ? &info.value() : nullptr, g_mm->game_version(), on_targets);
+        g_row_enabled.push_back(enabled_in(g_activation, mod_ids).empty() ? 0 : 1);
+        g_row_mod_ids.push_back(std::move(mod_ids));
         g_row_names.push_back(to_w(title));
         g_row_meta.push_back(to_w(meta));
-        g_row_folders.push_back(m.folder);
+        g_row_folders.push_back(m.folders.front());
+        g_row_icon_paths.push_back(info && !info->icon.empty() ? info->icon.string()
+                                                              : std::string{});
         g_row_updates.push_back(g_mm->update_available(m.workshop_id) ? 1 : 0);
         LRESULT added = SendMessageW(g_list, LB_ADDSTRING, 0,
                                      (LPARAM)g_row_names.back().c_str());
         if (added >= 0) g_row_ids.push_back(m.workshop_id);
-        if (auto bitmap = load_icon_bitmap(g_mm->icon_for(m.folder)))
-            g_icons[m.folder] = bitmap;
     }
 
     std::vector<std::uint64_t> keep;
@@ -305,25 +505,77 @@ void refresh_list() {
         if (std::find(keep.begin(), keep.end(), id) == keep.end()) keep.push_back(id);
     }
     g_selected_ids.swap(keep);
+    std::vector<std::string> keep_folders;
+    for (const auto& folder : g_selected_folders) {
+        if (std::find(g_row_folders.begin(), g_row_folders.end(), folder) ==
+            g_row_folders.end()) continue;
+        if (std::find(keep_folders.begin(), keep_folders.end(), folder) == keep_folders.end())
+            keep_folders.push_back(folder);
+    }
+    g_selected_folders.swap(keep_folders);
     for (std::size_t i = 0; i < g_row_ids.size(); ++i) {
-        if (std::find(g_selected_ids.begin(), g_selected_ids.end(), g_row_ids[i]) !=
-            g_selected_ids.end())
-            SendMessageW(g_list, LB_SETSEL, TRUE, (LPARAM)i);
+        const bool selected = g_row_ids[i] != 0
+            ? std::find(g_selected_ids.begin(), g_selected_ids.end(), g_row_ids[i]) !=
+                  g_selected_ids.end()
+            : std::find(g_selected_folders.begin(), g_selected_folders.end(),
+                        g_row_folders[i]) != g_selected_folders.end();
+        if (selected) SendMessageW(g_list, LB_SETSEL, TRUE, (LPARAM)i);
     }
 
     SetWindowTextW(g_count,
-        (to_w(std::to_string(g_row_ids.size())) + L" shown").c_str());
+        (to_w(std::to_string(g_row_ids.size())) +
+         (g_row_ids.size() == 1 ? L" mod" : L" mods")).c_str());
+    if (g_empty) {
+        const bool filtered = !filter.empty() || g_only_updates;
+        SetWindowTextW(g_empty,
+            filtered ? L"No mods match the current filters."
+                     : L"No mods installed yet. Paste a Workshop link above to begin.");
+        ShowWindow(g_empty, g_row_ids.empty() ? SW_SHOW : SW_HIDE);
+    }
     SetWindowTextW(g_sort, g_sort_mode == 0 ? L"Sort: Name" : L"Sort: Updated");
     for (HWND b : {g_filter_all, g_filter_updates, g_sort}) InvalidateRect(b, nullptr, TRUE);
     update_actions();
     set_details();
-    set_status("Ready");
+    set_status(g_dependency_warning.empty() ? "Ready" : g_dependency_warning);
 }
 
 void sync_selection() {
     g_selected_ids = selected_ids();
+    g_selected_folders = selected_folders();
     update_actions();
     set_details();
+}
+
+LRESULT CALLBACK ListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (!g_busy && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK)) {
+        const int mx = static_cast<short>(LOWORD(lp));
+        const int my = static_cast<short>(HIWORD(lp));
+        const LRESULT hit = SendMessageW(hwnd, LB_ITEMFROMPOINT, 0,
+                                         MAKELPARAM(mx, my));
+        const int item = static_cast<int>(LOWORD(hit));
+        if (HIWORD(hit) == 0 && item >= 0 && item < static_cast<int>(g_row_ids.size())) {
+            RECT item_rc{};
+            if (SendMessageW(hwnd, LB_GETITEMRECT, item, (LPARAM)&item_rc) != LB_ERR) {
+                const int cx = item_rc.right - 30;
+                const int cy = item_rc.top + kRowH / 2;
+                const int dx = mx - cx;
+                const int dy = my - cy;
+                if (dx * dx + dy * dy <= 100) {   // the check circle has a 9px radius
+                    if (msg == WM_LBUTTONDOWN) {
+                        // Toggle only this row. Do not let the listbox replace
+                        // the whole selection as a normal click would.
+                        const LRESULT selected = SendMessageW(hwnd, LB_GETSEL, item, 0);
+                        SendMessageW(hwnd, LB_SETSEL, selected ? FALSE : TRUE, item);
+                        sync_selection();
+                        InvalidateRect(hwnd, &item_rc, FALSE);
+                    }
+                    SetFocus(hwnd);
+                    return 0;
+                }
+            }
+        }
+    }
+    return CallWindowProcW(g_list_old_proc, hwnd, msg, wp, lp);
 }
 
 void select_all() {
@@ -335,8 +587,64 @@ void select_all() {
 void clear_selection() {
     SendMessageW(g_list, LB_SETSEL, FALSE, -1);
     g_selected_ids.clear();
+    g_selected_folders.clear();
     update_actions();
     set_details();
+}
+
+bool copy_plain_text(const std::string& value) {
+    if (value.empty()) return false;
+    const std::wstring text = to_w(value);
+    if (!OpenClipboard(g_hwnd)) return false;
+    EmptyClipboard();
+    bool copied = false;
+    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (memory) {
+        void* target = GlobalLock(memory);
+        if (target) {
+            std::memcpy(target, text.c_str(), bytes);
+            GlobalUnlock(memory);
+            copied = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
+        }
+        if (!copied) GlobalFree(memory);
+    }
+    CloseClipboard();
+    return copied;
+}
+
+bool copy_workshop_ids(const std::vector<std::uint64_t>& ids) {
+    if (ids.empty()) return false;
+    const std::wstring text = to_w(join_workshop_ids(ids));
+    if (!OpenClipboard(g_hwnd)) {
+        append_log("Could not open the clipboard.");
+        return false;
+    }
+    EmptyClipboard();
+    bool copied = false;
+    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (memory) {
+        void* target = GlobalLock(memory);
+        if (target) {
+            std::memcpy(target, text.c_str(), bytes);
+            GlobalUnlock(memory);
+            copied = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
+        }
+        if (!copied) GlobalFree(memory);
+    }
+    CloseClipboard();
+    return copied;
+}
+
+void copy_selected_ids() {
+    const auto ids = selected_ids();
+    if (ids.empty()) return;
+    if (copy_workshop_ids(ids))
+        append_log("Copied " + std::to_string(ids.size()) +
+                   " Workshop ID(s). Paste them into another pzmodmgr.");
+    else
+        append_log("Could not write to the clipboard.");
 }
 
 void drain_pending() {
@@ -373,7 +681,7 @@ void start_command(const std::string& line) {
     EnableWindow(g_list, FALSE);
     EnableWindow(g_filter, FALSE);
     update_actions();
-    set_status("Working... steamcmd may take a while...");
+    set_status("Working - steamcmd may take a while...");
 
     if (g_worker.joinable()) g_worker.join();
     try {
@@ -396,11 +704,110 @@ std::string read_edit(HWND edit) {
     return to_u8(buf);
 }
 
+// The X11 UI keeps its cue visible whenever the field is empty. Draw it after
+// the edit paints so Win32 does not fall back to a focus-sensitive cue banner.
+void sync_edit_cue_caret(HWND edit) {
+    if (GetFocus() != edit) return;
+    if (GetWindowTextLengthW(edit) == 0) HideCaret(edit);
+    else ShowCaret(edit);
+}
+
+void draw_edit_placeholder(HWND edit, const wchar_t* text) {
+    if (!text || GetWindowTextLengthW(edit) != 0) return;
+    HDC dc = GetDC(edit);
+    if (!dc) return;
+
+    RECT rc{};
+    SendMessageW(edit, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&rc));
+    const int old_mode = SetBkMode(dc, TRANSPARENT);
+    const COLORREF old_color = SetTextColor(dc, g_theme.muted);
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(edit, WM_GETFONT, 0, 0));
+    HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
+    DrawTextW(dc, text, -1, &rc,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (old_font) SelectObject(dc, old_font);
+    SetTextColor(dc, old_color);
+    SetBkMode(dc, old_mode);
+    ReleaseDC(edit, dc);
+}
+
+LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto it = g_edit_placeholders.find(hwnd);
+    if (it == g_edit_placeholders.end() || !it->second.old_proc)
+        return DefWindowProcW(hwnd, msg, wp, lp);
+
+    switch (msg) {
+    case WM_PAINT: {
+        const LRESULT result = CallWindowProcW(it->second.old_proc, hwnd, msg, wp, lp);
+        draw_edit_placeholder(hwnd, it->second.text);
+        sync_edit_cue_caret(hwnd);
+        return result;
+    }
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+    case WM_ENABLE:
+    case WM_SETTEXT: {
+        const LRESULT result = CallWindowProcW(it->second.old_proc, hwnd, msg, wp, lp);
+        sync_edit_cue_caret(hwnd);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return result;
+    }
+    case WM_PASTE: {
+        // The add field takes several IDs at once, so keep line breaks from a
+        // pasted list instead of letting a single-line edit drop them.
+        if (hwnd == g_input && OpenClipboard(hwnd)) {
+            HANDLE data = GetClipboardData(CF_UNICODETEXT);
+            if (data) {
+                const wchar_t* raw = static_cast<const wchar_t*>(GlobalLock(data));
+                if (raw) {
+                    std::wstring text(raw);
+                    GlobalUnlock(data);
+                    for (wchar_t& c : text)
+                        if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
+                    SendMessageW(hwnd, EM_REPLACESEL, TRUE, (LPARAM)text.c_str());
+                    CloseClipboard();
+                    return 0;
+                }
+            }
+            CloseClipboard();
+        }
+        return CallWindowProcW(it->second.old_proc, hwnd, msg, wp, lp);
+    }
+    case WM_CHAR:
+    case WM_LBUTTONUP: {
+        const LRESULT result = CallWindowProcW(it->second.old_proc, hwnd, msg, wp, lp);
+        sync_edit_cue_caret(hwnd);
+        return result;
+    }
+    case WM_NCDESTROY: {
+        const LRESULT result = CallWindowProcW(it->second.old_proc, hwnd, msg, wp, lp);
+        g_edit_placeholders.erase(hwnd);
+        return result;
+    }
+    default:
+        return CallWindowProcW(it->second.old_proc, hwnd, msg, wp, lp);
+    }
+}
+
+void set_edit_placeholder(HWND edit, const wchar_t* text) {
+    auto it = g_edit_placeholders.find(edit);
+    if (it != g_edit_placeholders.end()) {
+        it->second.text = text;
+        InvalidateRect(edit, nullptr, TRUE);
+        return;
+    }
+    WNDPROC old = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+        edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EditProc)));
+    if (!old) return;
+    g_edit_placeholders[edit] = {old, text};
+    InvalidateRect(edit, nullptr, TRUE);
+}
+
 void add_input() {
     if (g_busy) return;
     std::string id = read_edit(g_input);
     if (id.empty()) {
-        set_status("Enter a Workshop URL or ID first");
+        set_status("Enter one or more Workshop URLs or IDs first");
         SetFocus(g_input);
         return;
     }
@@ -447,128 +854,28 @@ void remove_selected() {
     start_command(cmd);
 }
 
-void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color,
-                      COLORREF background) {
-    const int top = cy - 9, bottom = cy + 9;
-    auto line = [&](int x1, int y1, int x2, int y2) {
-        MoveToEx(hdc, x1, y1, nullptr);
-        LineTo(hdc, x2, y2);
-    };
-
-    LOGBRUSH lb{};
-    lb.lbStyle = BS_SOLID;
-    lb.lbColor = color;
-    HPEN pen = reinterpret_cast<HPEN>(ExtCreatePen(
-        PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 1, &lb, 0,
-        nullptr));
-    if (!pen) pen = CreatePen(PS_SOLID, 1, color);
-    HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ old_pen = SelectObject(hdc, pen);
-    HGDIOBJ old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    auto fill = [&](std::initializer_list<POINT> points) {
-        std::vector<POINT> shape(points);
-        HGDIOBJ old = SelectObject(hdc, brush);
-        Polygon(hdc, shape.data(), static_cast<int>(shape.size()));
-        SelectObject(hdc, old);
-    };
-    auto fill_rect = [&](int rx, int ry, int rw, int rh) {
-        RECT r{rx, ry, rx + rw, ry + rh};
-        FillRect(hdc, &r, brush);
-    };
-
+void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color) {
+    const glyphs::Glyph* glyph = nullptr;
     switch (id) {
-    case ID_ADD:
-        line(x + 9, top + 1, x + 9, cy);
-        fill({{x + 3, cy - 1}, {x + 15, cy - 1}, {x + 9, cy + 5}});
-        line(x + 2, cy + 5, x + 2, bottom - 2);
-        line(x + 2, bottom - 2, x + 16, bottom - 2);
-        line(x + 16, bottom - 2, x + 16, cy + 5);
-        break;
-    case ID_UPDATE:
-        line(x + 2, cy - 5, x + 11, cy - 5);
-        fill({{x + 16, cy - 5}, {x + 11, top}, {x + 11, cy - 1}});
-        line(x + 16, cy + 5, x + 7, cy + 5);
-        fill({{x + 2, cy + 5}, {x + 7, cy + 1}, {x + 7, bottom}});
-        break;
-    case ID_UPDATE_ALL:
-        line(x + 2, cy - 6, x + 10, cy - 6);
-        fill({{x + 16, cy - 6}, {x + 11, top}, {x + 11, cy - 2}});
-        line(x + 16, cy + 2, x + 8, cy + 2);
-        fill({{x + 2, cy + 2}, {x + 7, cy - 2}, {x + 7, cy + 6}});
-        line(x + 1, bottom, x + 17, bottom);
-        break;
-    case ID_REMOVE:
-        line(x + 1, cy - 6, x + 17, cy - 6);
-        line(x + 6, cy - 8, x + 6, cy - 6);
-        line(x + 6, cy - 8, x + 12, cy - 8);
-        line(x + 12, cy - 8, x + 12, cy - 6);
-        line(x + 3, cy - 4, x + 3, bottom - 2);
-        line(x + 3, bottom - 2, x + 15, bottom - 2);
-        line(x + 15, bottom - 2, x + 15, cy - 4);
-        line(x + 7, cy, x + 7, bottom - 5);
-        line(x + 11, cy, x + 11, bottom - 5);
-        break;
-    case ID_SELECT_ALL:
-        line(x + 1, cy - 8, x + 17, cy - 8);
-        line(x + 17, cy - 8, x + 17, cy + 8);
-        line(x + 17, cy + 8, x + 1, cy + 8);
-        line(x + 1, cy + 8, x + 1, cy - 8);
-        line(x + 5, cy, x + 8, cy + 3);
-        line(x + 8, cy + 3, x + 13, cy - 3);
-        break;
-    case ID_CLEAR:
-        line(x + 3, cy - 6, x + 15, cy + 6);
-        line(x + 15, cy - 6, x + 3, cy + 6);
-        break;
-    case ID_SETTINGS:
-        fill_rect(x + 7, cy - 9, 4, 4);
-        fill_rect(x + 7, cy + 5, 4, 4);
-        fill_rect(x, cy - 2, 4, 4);
-        fill_rect(x + 14, cy - 2, 4, 4);
-        fill_rect(x + 2, cy - 8, 3, 3);
-        fill_rect(x + 13, cy - 8, 3, 3);
-        fill_rect(x + 2, cy + 5, 3, 3);
-        fill_rect(x + 13, cy + 5, 3, 3);
-        {
-            HGDIOBJ no_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-            HGDIOBJ icon_brush = SelectObject(hdc, brush);
-            Ellipse(hdc, x + 3, cy - 6, x + 15, cy + 6);
-            HBRUSH background_brush = CreateSolidBrush(background);
-            SelectObject(hdc, background_brush);
-            Ellipse(hdc, x + 5, cy - 4, x + 13, cy + 4);
-            SelectObject(hdc, icon_brush);
-            SelectObject(hdc, no_pen);
-            DeleteObject(background_brush);
-        }
-        break;
+    case ID_ADD: glyph = &glyphs::kInstall; break;
+    case ID_UPDATE: glyph = &glyphs::kUpdate; break;
+    case ID_UPDATE_ALL: glyph = &glyphs::kUpdateAll; break;
+    case ID_REMOVE: glyph = &glyphs::kRemove; break;
+    case ID_SELECT_ALL: glyph = &glyphs::kSelectAll; break;
+    case ID_CLEAR: glyph = &glyphs::kClear; break;
     case ID_FILTER_ALL:
-    case ID_FILTER_UPDATES:
-        line(x + 1, cy - 8, x + 17, cy - 8);
-        line(x + 17, cy - 8, x + 11, cy - 1);
-        line(x + 11, cy - 1, x + 11, cy + 6);
-        line(x + 11, cy + 6, x + 7, bottom);
-        line(x + 7, bottom, x + 7, cy - 1);
-        line(x + 7, cy - 1, x + 1, cy - 8);
-        break;
-    case ID_SORT:
-        line(x + 6, bottom, x + 6, cy - 3);
-        fill({{x + 1, cy - 2}, {x + 11, cy - 2}, {x + 6, top}});
-        line(x + 12, top, x + 12, cy + 3);
-        fill({{x + 7, cy + 2}, {x + 17, cy + 2}, {x + 12, bottom}});
-        break;
-    case ID_CHECK:
-        Ellipse(hdc, x + 1, cy - 8, x + 14, cy + 5);
-        line(x + 11, cy + 2, x + 16, cy + 7);
-        line(x + 4, cy - 1, x + 6, cy + 1);
-        line(x + 6, cy + 1, x + 9, cy - 3);
-        break;
-    default:
-        break;
+    case ID_FILTER_UPDATES: glyph = &glyphs::kFilter; break;
+    case ID_SORT: glyph = &glyphs::kSort; break;
+    default: return;   // Check intentionally has no glyph.
     }
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
+
+    HBRUSH brush = CreateSolidBrush(color);
+    const int origin_x = x + 1, origin_y = cy - 8;
+    glyphs::visit(*glyph, [&](int gx, int gy) {
+        RECT pixel{origin_x + gx, origin_y + gy, origin_x + gx + 1, origin_y + gy + 1};
+        FillRect(hdc, &pixel, brush);
+    });
     DeleteObject(brush);
-    DeleteObject(pen);
 }
 
 void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
@@ -580,31 +887,26 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     RECT r = dis->rcItem;
     HBRUSH fill_brush = g_card_brush;
     HBRUSH border_brush = g_border_brush;
-    COLORREF fill_color = RGB(255, 255, 255);
-    COLORREF text_color = RGB(31, 38, 46);
-    COLORREF icon_color = kBrand;
+    COLORREF text_color = g_theme.text;
+    COLORREF icon_color = g_theme.brand;
     if (disabled) {
         fill_brush = g_bg_brush;
-        fill_color = RGB(246, 247, 249);
-        text_color = RGB(108, 118, 132);
-        icon_color = RGB(108, 118, 132);
+        text_color = g_theme.muted;
+        icon_color = g_theme.muted;
     } else if (active_chip) {
         fill_brush = g_brand_soft_brush;
-        fill_color = kBrandSoft;
         border_brush = g_brand_brush;
-        text_color = kBrand;
-        icon_color = kBrand;
+        text_color = g_theme.brand;
+        icon_color = g_theme.brand;
     } else if (primary) {
         fill_brush = g_accent_brush;
-        fill_color = RGB(224, 100, 43);
         border_brush = g_accent_brush;
-        text_color = RGB(255, 255, 255);
-        icon_color = RGB(255, 255, 255);
+        text_color = g_theme.on_accent;
+        icon_color = g_theme.on_accent;
     } else if (pressed) {
         fill_brush = g_brand_soft_brush;
-        fill_color = kBrandSoft;
         border_brush = g_brand_brush;
-        icon_color = kBrand;
+        icon_color = g_theme.brand;
     }
     FillRect(dis->hDC, &r, fill_brush);
     FrameRect(dis->hDC, &r, border_brush);
@@ -616,10 +918,13 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     HGDIOBJ old = SelectObject(dis->hDC, g_font_body);
     SIZE size{};
     GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
-    const int start = r.left + (r.right - r.left - 18 - 7 - size.cx) / 2;
-    draw_button_icon(dis->hDC, id, start, (r.top + r.bottom) / 2, icon_color,
-                     fill_color);
-    RECT text_rc{start + 25, r.top, r.right - 4, r.bottom};
+    const bool show_icon = id != ID_SETTINGS && id != ID_CHECK;
+    const int icon_w = show_icon ? 18 : 0;
+    const int gap = show_icon ? 7 : 0;
+    const int start = r.left + (r.right - r.left - icon_w - gap - size.cx) / 2;
+    if (show_icon)
+        draw_button_icon(dis->hDC, id, start, (r.top + r.bottom) / 2, icon_color);
+    RECT text_rc{start + icon_w + gap, r.top, r.right - 4, r.bottom};
     DrawTextW(dis->hDC, label, -1, &text_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dis->hDC, old);
@@ -637,10 +942,21 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     FrameRect(dis->hDC, &card, selected ? g_accent_brush : g_border_brush);
 
     const bool has_update = index < g_row_updates.size() && g_row_updates[index] != 0;
+    const bool switchable = !g_activation.empty();
+    const bool is_enabled = index < g_row_enabled.size() && g_row_enabled[index] != 0;
     RECT icon_rc{card.left + 10, card.top + 8, card.left + 58, card.top + 56};
     bool drew_icon = false;
+    // Decode only the icons that are actually painted, and keep them cached
+    // across list refreshes. A large library would otherwise pay a full PNG
+    // decode per mod on the UI thread every time the filter changes.
     auto it = g_icons.find(g_row_folders[index]);
-    if (it != g_icons.end() && it->second) {
+    if (it == g_icons.end()) {
+        HBITMAP bitmap = nullptr;
+        if (index < g_row_icon_paths.size() && !g_row_icon_paths[index].empty())
+            bitmap = load_icon_bitmap(fs::path(g_row_icon_paths[index]));
+        it = g_icons.emplace(g_row_folders[index], bitmap).first;
+    }
+    if (it->second) {
         HDC memory = CreateCompatibleDC(dis->hDC);
         HGDIOBJ old = SelectObject(memory, it->second);
         BitBlt(dis->hDC, icon_rc.left, icon_rc.top, 48, 48, memory, 0, 0, SRCCOPY);
@@ -649,11 +965,11 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
         drew_icon = true;
     }
     if (!drew_icon) {
-        HBRUSH soft = CreateSolidBrush(RGB(255, 242, 234));
+        HBRUSH soft = CreateSolidBrush(g_theme.accent_soft);
         FillRect(dis->hDC, &icon_rc, soft);
         DeleteObject(soft);
         SetBkMode(dis->hDC, TRANSPARENT);
-        SetTextColor(dis->hDC, RGB(224, 100, 43));
+        SetTextColor(dis->hDC, g_theme.accent);
         HGDIOBJ old = SelectObject(dis->hDC, g_font_title);
         std::wstring initial = g_row_names[index].substr(0, 1);
         DrawTextW(dis->hDC, initial.c_str(), -1, &icon_rc,
@@ -662,31 +978,44 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     }
 
     SetBkMode(dis->hDC, TRANSPARENT);
-    SetTextColor(dis->hDC, RGB(31, 38, 46));
+    SetTextColor(dis->hDC, g_theme.text);
     HGDIOBJ old_font = SelectObject(dis->hDC, g_font_title);
-    const int text_right = card.right - (has_update ? 132 : 50);
+    const int text_right = card.right - (has_update ? (switchable ? 256 : 132)
+                                                   : (switchable ? 198 : 50));
     RECT name_rc{card.left + 72, card.top + 9, text_right, card.top + 31};
     DrawTextW(dis->hDC, g_row_names[index].c_str(), -1, &name_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dis->hDC, g_font_small);
-    SetTextColor(dis->hDC, RGB(108, 118, 132));
+    SetTextColor(dis->hDC, g_theme.muted);
     RECT meta_rc{card.left + 72, card.top + 32, text_right, card.top + 54};
     DrawTextW(dis->hDC, g_row_meta[index].c_str(), -1, &meta_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
+    if (switchable) {
+        RECT pill{card.right - (has_update ? 190 : 124), card.top + 22,
+                  card.right - (has_update ? 126 : 60), card.top + 42};
+        HBRUSH fill_brush = CreateSolidBrush(is_enabled ? g_theme.success : g_theme.surface);
+        FillRect(dis->hDC, &pill, fill_brush);
+        DeleteObject(fill_brush);
+        if (!is_enabled) FrameRect(dis->hDC, &pill, g_border_brush);
+        SetTextColor(dis->hDC, is_enabled ? g_theme.on_accent : g_theme.muted);
+        DrawTextW(dis->hDC, is_enabled ? L"ON" : L"OFF", -1, &pill,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
     if (has_update) {
         RECT pill{card.right - 124, card.top + 22, card.right - 60, card.top + 42};
-        HBRUSH orange = CreateSolidBrush(RGB(224, 100, 43));
+        HBRUSH orange = CreateSolidBrush(g_theme.accent);
         FillRect(dis->hDC, &pill, orange);
         DeleteObject(orange);
-        SetTextColor(dis->hDC, RGB(255, 255, 255));
+        SetTextColor(dis->hDC, g_theme.on_accent);
         DrawTextW(dis->hDC, L"UPDATE", -1, &pill,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
     const int cx = card.right - 30, cy = card.top + kRowH / 2;
-    HBRUSH circle = CreateSolidBrush(selected ? RGB(224, 100, 43) : RGB(255, 255, 255));
-    HPEN ring = CreatePen(PS_SOLID, 1, selected ? RGB(224, 100, 43) : kBrandBorder);
+    HBRUSH circle = CreateSolidBrush(selected ? g_theme.accent : g_theme.surface);
+    HPEN ring = CreatePen(PS_SOLID, 1, selected ? g_theme.accent : g_theme.brand_border);
     HGDIOBJ old_brush = SelectObject(dis->hDC, circle);
     HGDIOBJ old_pen = SelectObject(dis->hDC, ring);
     Ellipse(dis->hDC, cx - 9, cy - 9, cx + 9, cy + 9);
@@ -696,7 +1025,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     DeleteObject(circle);
 
     if (selected) {
-        HPEN check = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+        HPEN check = CreatePen(PS_SOLID, 2, g_theme.on_accent);
         HGDIOBJ old = SelectObject(dis->hDC, check);
         MoveToEx(dis->hDC, cx - 4, cy, nullptr);
         LineTo(dis->hDC, cx - 1, cy + 3);
@@ -712,44 +1041,84 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
         g_settings_wnd = hwnd;
         {
-            HWND label = CreateWindowW(L"STATIC", L"steamcmd executable (blank = built-in):",
-                WS_CHILD | WS_VISIBLE, 24, 20, 560, 20, hwnd, nullptr, nullptr, nullptr);
+            HWND label = CreateWindowW(L"STATIC",
+                L"Zomboid folder (absolute path; contains mods and pzmodmgr):",
+                WS_CHILD | WS_VISIBLE, 24, 20, 570, 20, hwnd, nullptr, nullptr, nullptr);
             set_font(label, g_font_body);
-            g_set_path = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+            g_set_zomboid = CreateWindowW(L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
                 24, 44, 560, 28, hwnd, nullptr, nullptr, nullptr);
-            set_font(g_set_path, g_font_body);
-            label = CreateWindowW(L"STATIC", L"Steam username:",
+            set_font(g_set_zomboid, g_font_body);
+            label = CreateWindowW(L"STATIC", L"steamcmd executable (blank = built-in):",
                 WS_CHILD | WS_VISIBLE, 24, 86, 560, 20, hwnd, nullptr, nullptr, nullptr);
             set_font(label, g_font_body);
-            g_set_user = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+            g_set_path = CreateWindowW(L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
                 24, 110, 560, 28, hwnd, nullptr, nullptr, nullptr);
+            set_font(g_set_path, g_font_body);
+            label = CreateWindowW(L"STATIC", L"Steam username:",
+                WS_CHILD | WS_VISIBLE, 24, 152, 560, 20, hwnd, nullptr, nullptr, nullptr);
+            set_font(label, g_font_body);
+            g_set_user = CreateWindowW(L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+                24, 176, 560, 28, hwnd, nullptr, nullptr, nullptr);
             set_font(g_set_user, g_font_body);
             label = CreateWindowW(L"STATIC",
                 L"No password is stored. Run steamcmd manually once so its login is cached.",
-                WS_CHILD | WS_VISIBLE, 24, 150, 570, 20, hwnd, nullptr, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE, 24, 216, 570, 20, hwnd, nullptr, nullptr, nullptr);
             set_font(label, g_font_small);
+            label = CreateWindowW(L"STATIC",
+                L"Use anonymous for public Workshop items.",
+                WS_CHILD | WS_VISIBLE, 24, 234, 570, 20, hwnd, nullptr, nullptr, nullptr);
+            set_font(label, g_font_small);
+            g_set_dark = CreateWindowW(L"BUTTON", L"Dark mode",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                24, 260, 180, 22, hwnd, (HMENU)ID_SET_DARK, nullptr, nullptr);
+            set_font(g_set_dark, g_font_body);
+            g_set_auto = CreateWindowW(L"BUTTON",
+                L"Enable newly installed mods in mods/default.txt",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                24, 286, 430, 22, hwnd, (HMENU)ID_SET_AUTO, nullptr, nullptr);
+            set_font(g_set_auto, g_font_body);
             HWND save = CreateWindowW(L"BUTTON", L"Save",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 24, 186, 120, 30, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 24, 320, 120, 30, hwnd,
                 (HMENU)ID_SET_SAVE, nullptr, nullptr);
             set_font(save, g_font_body);
             HWND cancel = CreateWindowW(L"BUTTON", L"Cancel",
-                WS_CHILD | WS_VISIBLE, 158, 186, 120, 30, hwnd,
+                WS_CHILD | WS_VISIBLE, 158, 320, 120, 30, hwnd,
                 (HMENU)ID_SET_CANCEL, nullptr, nullptr);
             set_font(cancel, g_font_body);
         }
 
+        SetWindowTextW(g_set_zomboid,
+                       to_w(g_mm->config().zomboid_dir.string()).c_str());
         SetWindowTextW(g_set_path, to_w(g_mm->config().steamcmd_exe.string()).c_str());
         SetWindowTextW(g_set_user, to_w(g_mm->config().steam_user).c_str());
-        SetFocus(g_set_path);
+        SendMessageW(g_set_dark, BM_SETCHECK,
+                     g_mm->config().dark_mode ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g_set_auto, BM_SETCHECK,
+                     g_mm->config().auto_enable ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetFocus(g_set_zomboid);
         return 0;
     case WM_CTLCOLORSTATIC: {
         SetBkMode((HDC)wp, TRANSPARENT);
+        SetTextColor((HDC)wp, g_theme.text);
         return (LRESULT)g_bg_brush;
+    }
+    case WM_CTLCOLORBTN: {
+        SetBkMode((HDC)wp, TRANSPARENT);
+        SetBkColor((HDC)wp, g_theme.bg);
+        SetTextColor((HDC)wp, g_theme.text);
+        return (LRESULT)g_bg_brush;
+    }
+    case WM_CTLCOLOREDIT: {
+        SetTextColor((HDC)wp, g_theme.text);
+        SetBkColor((HDC)wp, g_theme.field);
+        return (LRESULT)g_field_brush;
     }
     case WM_COMMAND:
         if (LOWORD(wp) == ID_SET_SAVE) {
+            std::string zomboid = read_edit(g_set_zomboid);
             std::string path = read_edit(g_set_path);
             std::string user = read_edit(g_set_user);
             if (user.empty()) {
@@ -757,14 +1126,31 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             MB_OK | MB_ICONWARNING);
                 return 0;
             }
+            const bool dark =
+                SendMessageW(g_set_dark, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            const bool auto_enable =
+                SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) == BST_CHECKED;
             auto log = [](const std::string& s) { append_log(s); };
             auto r1 = run_command(*g_mm, "config steamcmd_exe " + path, log);
             auto r2 = run_command(*g_mm, "config steam_user " + user, log);
-            if (r1.ok && r2.ok) {
-                append_log("settings saved");
+            auto r3 = run_command(*g_mm, "config zomboid_dir " + zomboid, log);
+            auto r4 = run_command(*g_mm, std::string("config dark_mode ") +
+                                       (dark ? "on" : "off"), log);
+            auto r5 = run_command(*g_mm, std::string("config auto_enable ") +
+                                       (auto_enable ? "on" : "off"), log);
+            if (r1.ok && r2.ok && r3.ok && r4.ok && r5.ok) {
                 DestroyWindow(hwnd);
+                apply_theme(g_mm->config().dark_mode, g_hwnd);
+                start_watcher(g_mm->config().data_dir);
+                g_mm->reload_installed();
+                clear_icons();
+                refresh_dependency_warning();
+                refresh_list();
+                append_log("Settings saved");
             } else {
-                MessageBoxW(hwnd, L"Could not save settings.", L"Settings",
+                const auto& failed = !r1.ok ? r1
+                    : (!r2.ok ? r2 : (!r3.ok ? r3 : (!r4.ok ? r4 : r5)));
+                MessageBoxW(hwnd, to_w(failed.message).c_str(), L"Settings",
                             MB_OK | MB_ICONERROR);
             }
             return 0;
@@ -779,6 +1165,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         g_settings_wnd = nullptr;
+        g_set_dark = nullptr;
+        g_set_auto = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -798,7 +1186,7 @@ void show_settings(HWND owner) {
 
     RECT r{};
     GetWindowRect(owner, &r);
-    const int w = 620, h = 260;
+    const int w = 620, h = 370;
     const int x = r.left + ((r.right - r.left) - w) / 2;
     const int y = r.top + ((r.bottom - r.top) - h) / 2;
     HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"PZSettingsWnd", L"Settings",
@@ -819,7 +1207,250 @@ void show_settings(HWND owner) {
     EnableWindow(owner, TRUE);
     SetActiveWindow(owner);
     SetFocus(g_input);
-    set_status("Settings updated");
+    set_status("Settings saved");
+}
+
+std::string target_state(const ActivationTarget& target) {
+    if (g_target_mod_ids.empty()) return "no Mod IDs";
+    const int count = activation_count(target, g_target_mod_ids);
+    if (count == 0) return "off";
+    if (count == static_cast<int>(g_target_mod_ids.size())) return "on";
+    return std::to_string(count) + " of " +
+           std::to_string(g_target_mod_ids.size()) + " on";
+}
+
+void update_target_copy_label() {
+    if (!g_tgt_copy) return;
+    const int sel = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
+    const bool server = sel >= 0 && sel < (int)g_targets.size() &&
+                        g_targets[(std::size_t)sel].kind == ActivationKind::Server;
+    SetWindowTextW(g_tgt_copy, server ? L"Copy server IDs" : L"Copy IDs");
+}
+
+void fill_target_list() {
+    SendMessageW(g_tgt_list, LB_RESETCONTENT, 0, 0);
+    const int keep = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
+    for (const auto& target : g_targets) {
+        const std::wstring line = to_w(target.label + "   [" + target_state(target) + "]");
+        SendMessageW(g_tgt_list, LB_ADDSTRING, 0, (LPARAM)line.c_str());
+    }
+    if (!g_targets.empty())
+        SendMessageW(g_tgt_list, LB_SETCURSEL,
+                     keep >= 0 && keep < (int)g_targets.size() ? keep : 0, 0);
+    if (g_tgt_status) {
+        const std::string text = g_targets.empty()
+            ? "No mods/default.txt, save, or server was found."
+            : "Enable or disable " +
+              std::to_string(g_selected_ids.size() + g_selected_folders.size()) +
+              " selected mod(s) in the highlighted target. Copy server IDs gives a "
+              "paste-ready list for Add on another pzmodmgr.";
+        SetWindowTextW(g_tgt_status, to_w(text).c_str());
+    }
+    update_target_copy_label();
+    if (g_targets_wnd) {
+        const int selection = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
+        EnableWindow(GetDlgItem(g_targets_wnd, ID_TGT_ENABLE), !g_target_mod_ids.empty());
+        EnableWindow(GetDlgItem(g_targets_wnd, ID_TGT_DISABLE), !g_target_mod_ids.empty());
+        EnableWindow(GetDlgItem(g_targets_wnd, ID_TGT_COPY_NAMES),
+                     selection >= 0 && selection < (int)g_targets.size() &&
+                         !g_targets[(std::size_t)selection].mod_ids.empty());
+    }
+}
+
+std::string target_command(int sel, bool enabled) {
+    std::string line = "set-enabled " + std::to_string(sel) +
+                       (enabled ? " on" : " off");
+    for (auto id : g_selected_ids) line += " w:" + std::to_string(id);
+    for (const auto& folder : g_selected_folders)
+        line += " " + folder_token(folder);
+    return line;
+}
+
+LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE:
+        g_targets_wnd = hwnd;
+        {
+            HWND label = CreateWindowW(L"STATIC",
+                L"Enable or disable the selected mods in:",
+                WS_CHILD | WS_VISIBLE, 24, 18, 540, 20, hwnd, nullptr, nullptr, nullptr);
+            set_font(label, g_font_body);
+            g_tgt_list = CreateWindowW(L"LISTBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY |
+                    WS_TABSTOP,
+                24, 44, 540, 250, hwnd, (HMENU)ID_TGT_LIST, nullptr, nullptr);
+            set_font(g_tgt_list, g_font_body);
+            g_tgt_status = CreateWindowW(L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE, 24, 304, 540, 34, hwnd, nullptr, nullptr,
+                nullptr);
+            set_font(g_tgt_status, g_font_small);
+            HWND enable = CreateWindowW(L"BUTTON", L"Enable",
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 24, 348, 100, 30, hwnd,
+                (HMENU)ID_TGT_ENABLE, nullptr, nullptr);
+            set_font(enable, g_font_body);
+            HWND disable = CreateWindowW(L"BUTTON", L"Disable",
+                WS_CHILD | WS_VISIBLE, 132, 348, 100, 30, hwnd,
+                (HMENU)ID_TGT_DISABLE, nullptr, nullptr);
+            set_font(disable, g_font_body);
+            g_tgt_copy = CreateWindowW(L"BUTTON", L"Copy IDs",
+                WS_CHILD | WS_VISIBLE, 240, 348, 100, 30, hwnd,
+                (HMENU)ID_TGT_COPY, nullptr, nullptr);
+            set_font(g_tgt_copy, g_font_body);
+            g_tgt_copy_names = CreateWindowW(L"BUTTON", L"Copy names",
+                WS_CHILD | WS_VISIBLE, 348, 348, 100, 30, hwnd,
+                (HMENU)ID_TGT_COPY_NAMES, nullptr, nullptr);
+            set_font(g_tgt_copy_names, g_font_body);
+            HWND close = CreateWindowW(L"BUTTON", L"Close",
+                WS_CHILD | WS_VISIBLE, 456, 348, 110, 30, hwnd,
+                (HMENU)ID_TGT_CLOSE, nullptr, nullptr);
+            set_font(close, g_font_body);
+        }
+        fill_target_list();
+        SetFocus(g_tgt_list);
+        return 0;
+    case WM_CTLCOLORSTATIC: {
+        SetBkMode((HDC)wp, TRANSPARENT);
+        SetTextColor((HDC)wp, g_theme.muted);
+        return (LRESULT)g_bg_brush;
+    }
+    case WM_COMMAND: {
+        const int id = LOWORD(wp);
+        if (id == ID_TGT_CLOSE) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        const int sel = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
+        if (sel < 0 || sel >= (int)g_targets.size()) return 0;
+        if (id == ID_TGT_LIST && HIWORD(wp) == LBN_SELCHANGE) {
+            update_target_copy_label();
+            return 0;
+        }
+        if (id == ID_TGT_ENABLE || id == ID_TGT_DISABLE) {
+            const std::string line = target_command(sel, id == ID_TGT_ENABLE);
+            auto log = [](const std::string& s) { append_log(s); };
+            auto result = run_command(*g_mm, line, log);
+            append_log(std::string(result.ok ? "OK: " : "ERROR: ") + result.message);
+            if (result.ok) {
+                g_targets = g_mm->activation_targets();
+                fill_target_list();
+                refresh_list();
+            }
+        } else if (id == ID_TGT_COPY) {
+            const auto& target = g_targets[(std::size_t)sel];
+            const auto ids = g_mm->workshop_ids_for(target);
+            if (ids.empty()) {
+                append_log("No Workshop IDs found for " + activation_name(target) +
+                           ". Use Copy names so the list can still be shared.");
+            } else if (copy_workshop_ids(ids)) {
+                std::string message = "Copied " + std::to_string(ids.size()) +
+                    " Workshop ID(s) from " + activation_name(target) +
+                    ". Paste the list into Add on the other pzmodmgr.";
+                const auto missing = g_mm->unmapped_mod_ids(target);
+                if (!missing.empty())
+                    message += " " + std::to_string(missing.size()) +
+                               " enabled Mod ID(s) have no installed Workshop ID; use Copy names.";
+                append_log(message);
+            } else {
+                append_log("Could not write to the clipboard.");
+            }
+        } else if (id == ID_TGT_COPY_NAMES) {
+            const auto& target = g_targets[(std::size_t)sel];
+            const auto names = g_mm->enabled_mod_names(target);
+            std::string text;
+            for (const auto& name : names) {
+                if (!text.empty()) text += '\n';
+                text += name;
+            }
+            if (text.empty()) {
+                append_log("No enabled Mod names found for " + activation_name(target) + ".");
+            } else if (copy_plain_text(text)) {
+                append_log("Copied " + std::to_string(names.size()) +
+                           " enabled Mod name(s) from " + activation_name(target) + ".");
+            } else {
+                append_log("Could not write to the clipboard.");
+            }
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_targets_wnd = nullptr;
+        g_tgt_list = nullptr;
+        g_tgt_status = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void show_targets(HWND owner, bool prefer_server = false, bool allow_empty = false) {
+    if (g_targets_wnd) return;
+    if (!allow_empty && g_selected_ids.empty() && g_selected_folders.empty()) return;
+
+    g_target_mod_ids.clear();
+    for (std::size_t i = 0; i < g_row_ids.size() && i < g_row_mod_ids.size(); ++i) {
+        const bool selected = g_row_ids[i] != 0
+            ? std::find(g_selected_ids.begin(), g_selected_ids.end(), g_row_ids[i]) !=
+                  g_selected_ids.end()
+            : std::find(g_selected_folders.begin(), g_selected_folders.end(),
+                        g_row_folders[i]) != g_selected_folders.end();
+        if (!selected) continue;
+        for (const auto& id : g_row_mod_ids[i]) {
+            if (std::find(g_target_mod_ids.begin(), g_target_mod_ids.end(), id) ==
+                g_target_mod_ids.end())
+                g_target_mod_ids.push_back(id);
+        }
+    }
+    if (g_target_mod_ids.empty() && !allow_empty) {
+        append_log("No Mod ID found for the selected mod(s).");
+        return;
+    }
+
+    g_targets = g_mm->activation_targets();
+    if (prefer_server) {
+        for (std::size_t i = 0; i < g_targets.size(); ++i)
+            if (g_targets[i].kind == ActivationKind::Server) {
+                // fill_target_list preserves this selection on creation.
+                g_targets.insert(g_targets.begin(), g_targets[i]);
+                g_targets.erase(g_targets.begin() + static_cast<std::ptrdiff_t>(i + 1));
+                break;
+            }
+    }
+    HINSTANCE hi = GetModuleHandleW(nullptr);
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = TargetsProc;
+    wc.hInstance = hi;
+    wc.lpszClassName = L"PZTargetsWnd";
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = g_bg_brush;
+    RegisterClassW(&wc);
+
+    RECT r{};
+    GetWindowRect(owner, &r);
+    const int w = 600, h = 430;
+    const int x = r.left + ((r.right - r.left) - w) / 2;
+    const int y = r.top + ((r.bottom - r.top) - h) / 2;
+    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"PZTargetsWnd",
+        L"Enable mods", WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, owner,
+        nullptr, hi, nullptr);
+    if (!dlg) return;
+
+    EnableWindow(owner, FALSE);
+    ShowWindow(dlg, SW_SHOW);
+
+    MSG msg;
+    while (g_targets_wnd && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(dlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    EnableWindow(owner, TRUE);
+    SetActiveWindow(owner);
+    SetFocus(g_input);
+    refresh_list();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -839,94 +1470,111 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_subtitle = CreateWindowW(L"STATIC", L"Project Zomboid Workshop installer",
                 WS_CHILD | WS_VISIBLE, 72, 46, 600, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(g_subtitle, g_font_small);
+            g_share_server_btn = CreateWindowW(L"BUTTON", L"Share server",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 560, 24, 116, 30,
+                hwnd, (HMENU)ID_SHARE_SERVER, nullptr, nullptr);
+            set_font(g_share_server_btn, g_font_body);
+            g_enable_btn = CreateWindowW(L"BUTTON", L"Enable...",
+                WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 688, 24, 100, 30,
+                hwnd, (HMENU)ID_ENABLE, nullptr, nullptr);
+            set_font(g_enable_btn, g_font_body);
             g_settings_btn = CreateWindowW(L"BUTTON", L"Settings",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 880, 24, 96, 30, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 800, 24, 96, 30, hwnd,
                 (HMENU)ID_SETTINGS, nullptr, nullptr);
             set_font(g_settings_btn, g_font_body);
 
             g_input = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 24, 84, 700, 38,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 24, 84, 644, 38,
                 hwnd, (HMENU)ID_INPUT, nullptr, nullptr);
             set_font(g_input, g_font_body);
+            set_edit_placeholder(g_input, L"Paste Workshop URLs or IDs");
             g_add = CreateWindowW(L"BUTTON", L"Install",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 740, 84, 212, 38, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 684, 84, 212, 38, hwnd,
                 (HMENU)ID_ADD, nullptr, nullptr);
             set_font(g_add, g_font_body);
-            SendMessageW(g_input, 0x1501, TRUE,
-                         (LPARAM)L"Paste a Workshop URL or numeric ID");
 
             HWND label = CreateWindowW(L"STATIC",
-                L"Paste a Workshop URL or numeric ID. Press Enter to install; collections are supported.",
-                WS_CHILD | WS_VISIBLE, 24, 132, 928, 18, hwnd, nullptr, nullptr, nullptr);
+                L"Paste Workshop URLs or IDs separated by spaces. Press Enter to install; collections are supported.",
+                WS_CHILD | WS_VISIBLE, 24, 132, 872, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(label, g_font_small);
 
             g_filter = CreateWindowW(L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
                 24, 158, 280, 24, hwnd, (HMENU)ID_FILTER, nullptr, nullptr);
             set_font(g_filter, g_font_small);
-            SendMessageW(g_filter, 0x1501, TRUE,
-                         (LPARAM)L"Filter name, author, version, or folder");
+            set_edit_placeholder(g_filter, L"Filter name or folder");
             g_filter_all = CreateWindowW(L"BUTTON", L"All",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 312, 158, 60, 24, hwnd,
                 (HMENU)ID_FILTER_ALL, nullptr, nullptr);
             g_filter_updates = CreateWindowW(L"BUTTON", L"Updates",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 378, 158, 112, 24, hwnd,
                 (HMENU)ID_FILTER_UPDATES, nullptr, nullptr);
-            g_sort = CreateWindowW(L"BUTTON", L"Sort: Name",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 506, 158, 140, 24, hwnd,
-                (HMENU)ID_SORT, nullptr, nullptr);
-            g_check = CreateWindowW(L"BUTTON", L"Check",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 660, 158, 100, 24, hwnd,
+            g_check = CreateWindowW(L"BUTTON", L"Check updates",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 496, 158, 120, 24, hwnd,
                 (HMENU)ID_CHECK, nullptr, nullptr);
-            for (HWND b : {g_filter_all, g_filter_updates, g_sort, g_check})
+            g_sort = CreateWindowW(L"BUTTON", L"Sort: Name",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 626, 158, 140, 24, hwnd,
+                (HMENU)ID_SORT, nullptr, nullptr);
+            for (HWND b : {g_filter_all, g_filter_updates, g_check, g_sort})
                 set_font(b, g_font_small);
-            g_count = CreateWindowW(L"STATIC", L"0 shown",
-                WS_CHILD | WS_VISIBLE | SS_RIGHT, 800, 158, 176, 18, hwnd, nullptr,
+            g_count = CreateWindowW(L"STATIC", L"0 mods",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT, 776, 158, 120, 18, hwnd, nullptr,
                 nullptr, nullptr);
             set_font(g_count, g_font_small);
 
             g_list = CreateWindowW(L"LISTBOX", L"",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_EXTENDEDSEL |
-                    LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT | WS_TABSTOP,
-                24, 192, 952, 344, hwnd, (HMENU)ID_LIST, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPSIBLINGS | LBS_NOTIFY |
+                    LBS_EXTENDEDSEL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
+                    LBS_NOINTEGRALHEIGHT | WS_TABSTOP,
+                24, 192, 872, 344, hwnd, (HMENU)ID_LIST, nullptr, nullptr);
+            g_list_old_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+                g_list, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ListProc)));
             SendMessageW(g_list, LB_SETITEMHEIGHT, 0, 68);
+            g_empty = CreateWindowW(L"STATIC", L"",
+                WS_CHILD | WS_CLIPSIBLINGS | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+                24, 192, 872, 68, hwnd, nullptr, nullptr, nullptr);
+            set_font(g_empty, g_font_body);
 
-            g_update = CreateWindowW(L"BUTTON", L"Update",
-                WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 24, 554, 100, 32,
-                hwnd, (HMENU)ID_UPDATE, nullptr, nullptr);
-            g_remove = CreateWindowW(L"BUTTON", L"Remove",
-                WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 136, 554, 130, 32,
-                hwnd, (HMENU)ID_REMOVE, nullptr, nullptr);
-            g_update_all = CreateWindowW(L"BUTTON", L"Update all",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 278, 554, 110, 32, hwnd,
-                (HMENU)ID_UPDATE_ALL, nullptr, nullptr);
             g_select_all = CreateWindowW(L"BUTTON", L"Select all",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 400, 554, 90, 32, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 24, 554, 116, 32, hwnd,
                 (HMENU)ID_SELECT_ALL, nullptr, nullptr);
-            g_clear = CreateWindowW(L"BUTTON", L"Clear",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 502, 554, 60, 32, hwnd,
+            g_clear = CreateWindowW(L"BUTTON", L"Deselect",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 148, 554, 116, 32, hwnd,
                 (HMENU)ID_CLEAR, nullptr, nullptr);
-            for (HWND b : {g_update, g_remove, g_update_all, g_select_all, g_clear})
+            g_copy = CreateWindowW(L"BUTTON", L"Copy IDs",
+                WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 392, 554, 104, 32,
+                hwnd, (HMENU)ID_COPY, nullptr, nullptr);
+            g_update = CreateWindowW(L"BUTTON", L"Update",
+                WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 506, 554, 120, 32,
+                hwnd, (HMENU)ID_UPDATE, nullptr, nullptr);
+            g_update_all = CreateWindowW(L"BUTTON", L"Update all",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 636, 554, 120, 32, hwnd,
+                (HMENU)ID_UPDATE_ALL, nullptr, nullptr);
+            g_remove = CreateWindowW(L"BUTTON", L"Remove",
+                WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 766, 554, 130, 32,
+                hwnd, (HMENU)ID_REMOVE, nullptr, nullptr);
+            for (HWND b : {g_select_all, g_clear, g_copy, g_update, g_update_all, g_remove})
                 set_font(b, g_font_body);
 
             g_details = CreateWindowW(L"STATIC", L"No selection",
-                WS_CHILD | WS_VISIBLE, 600, 562, 376, 18, hwnd, nullptr, nullptr,
+                WS_CHILD | WS_VISIBLE, 276, 562, 220, 18, hwnd, nullptr, nullptr,
                 nullptr);
             set_font(g_details, g_font_small);
             g_activity_label = CreateWindowW(L"STATIC", L"ACTIVITY",
                 WS_CHILD | WS_VISIBLE, 24, 602, 200, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(g_activity_label, g_font_small);
             g_log = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
-                    WS_BORDER,
-                24, 622, 952, 62, hwnd, (HMENU)ID_LOG, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY |
+                    ES_AUTOVSCROLL | WS_BORDER,
+                24, 622, 872, 62, hwnd, (HMENU)ID_LOG, nullptr, nullptr);
             set_font(g_log, g_font_small);
             g_status = CreateWindowW(L"STATIC", L"Ready",
                 WS_CHILD | WS_VISIBLE, 24, 702, 500, 18, hwnd, nullptr, nullptr,
                 nullptr);
             set_font(g_status, g_font_small);
-            append_log("Paste a Workshop URL or ID, then press Enter.");
+            append_log("Paste Workshop URLs or IDs, then press Enter.");
             append_log("Click a mod to select it; Ctrl/Shift-click for more.");
+            refresh_dependency_warning();
             refresh_list();
         }
         return 0;
@@ -936,34 +1584,56 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         FillRect((HDC)wp, &r, g_bg_brush);
         return 1;
     }
+    case WM_CTLCOLORBTN: {
+        SetBkMode((HDC)wp, TRANSPARENT);
+        SetBkColor((HDC)wp, g_theme.bg);
+        SetTextColor((HDC)wp, g_theme.text);
+        return (LRESULT)g_bg_brush;
+    }
     case WM_CTLCOLORSTATIC: {
         if ((HWND)lp == g_brand_mark) {
             SetBkMode((HDC)wp, OPAQUE);
-            SetBkColor((HDC)wp, kBrand);
-            SetTextColor((HDC)wp, kCream);
+            SetBkColor((HDC)wp, g_theme.brand);
+            SetTextColor((HDC)wp, g_theme.cream);
             return (LRESULT)g_brand_brush;
         }
         if ((HWND)lp == g_brand_line) {
             SetBkMode((HDC)wp, OPAQUE);
-            SetBkColor((HDC)wp, RGB(224, 100, 43));
+            SetBkColor((HDC)wp, g_theme.accent);
             return (LRESULT)g_accent_brush;
         }
         SetBkMode((HDC)wp, TRANSPARENT);
+        if ((HWND)lp == g_log) {
+            SetBkColor((HDC)wp, g_theme.surface);
+            SetTextColor((HDC)wp, g_theme.text);
+            return (LRESULT)g_card_brush;
+        }
+        if ((HWND)lp == g_empty) {
+            SetBkMode((HDC)wp, OPAQUE);
+            SetBkColor((HDC)wp, g_theme.surface);
+            SetTextColor((HDC)wp, g_theme.muted);
+            return (LRESULT)g_card_brush;
+        }
         if ((HWND)lp == g_activity_label) {
-            SetTextColor((HDC)wp, kBrand);
+            SetTextColor((HDC)wp, g_theme.brand);
         } else if ((HWND)lp == g_status) {
-            SetTextColor((HDC)wp, g_busy ? RGB(224, 100, 43) : kBrand);
+            SetTextColor((HDC)wp, g_busy ? g_theme.accent
+                                         : (g_dependency_warning.empty()
+                                                ? g_theme.brand
+                                                : g_theme.danger));
         } else {
-            SetTextColor((HDC)wp, RGB(31, 38, 46));
+            SetTextColor((HDC)wp, g_theme.text);
         }
         return (LRESULT)g_bg_brush;
     }
     case WM_CTLCOLOREDIT: {
-        SetBkColor((HDC)wp, RGB(255, 255, 255));
-        return (LRESULT)g_card_brush;
+        SetTextColor((HDC)wp, g_theme.text);
+        SetBkColor((HDC)wp, g_theme.field);
+        return (LRESULT)g_field_brush;
     }
     case WM_CTLCOLORLISTBOX: {
-        SetBkColor((HDC)wp, RGB(246, 247, 249));
+        SetTextColor((HDC)wp, g_theme.text);
+        SetBkColor((HDC)wp, g_theme.bg);
         return (LRESULT)g_bg_brush;
     }
     case WM_DRAWITEM: {
@@ -974,8 +1644,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (wp == ID_ADD || wp == ID_UPDATE || wp == ID_REMOVE ||
             wp == ID_UPDATE_ALL || wp == ID_SELECT_ALL || wp == ID_CLEAR ||
-            wp == ID_SETTINGS || wp == ID_FILTER_ALL || wp == ID_FILTER_UPDATES ||
-            wp == ID_SORT || wp == ID_CHECK) {
+            wp == ID_COPY || wp == ID_SETTINGS || wp == ID_ENABLE ||
+            wp == ID_SHARE_SERVER || wp == ID_FILTER_ALL ||
+            wp == ID_FILTER_UPDATES || wp == ID_SORT || wp == ID_CHECK) {
             draw_flat_button(dis, (int)wp, wp == ID_ADD);
             return TRUE;
         }
@@ -998,14 +1669,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_SETTINGS:
             show_settings(hwnd);
             return 0;
+        case ID_ENABLE:
+            show_targets(hwnd);
+            return 0;
+        case ID_SHARE_SERVER:
+            show_targets(hwnd, true, true);
+            return 0;
         case ID_SELECT_ALL:
             select_all();
             return 0;
         case ID_CLEAR:
             clear_selection();
             return 0;
+        case ID_COPY:
+            copy_selected_ids();
+            return 0;
+        case ID_INPUT:
+            if (HIWORD(wp) == EN_CHANGE) InvalidateRect(g_input, nullptr, TRUE);
+            return 0;
         case ID_FILTER:
-            if (HIWORD(wp) == EN_CHANGE) refresh_list();
+            if (HIWORD(wp) == EN_CHANGE) {
+                InvalidateRect(g_filter, nullptr, TRUE);
+                refresh_list();
+            }
             return 0;
         case ID_FILTER_ALL:
             g_only_updates = false;
@@ -1032,15 +1718,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_LOG:
         drain_pending();
         return 0;
+    case WM_APP_RELOAD:
+        if (g_busy) {
+            g_reload_pending = true;
+        } else if (g_mm && g_mm->reload_installed()) {
+            clear_icons();
+            refresh_dependency_warning();
+            refresh_list();
+        }
+        return 0;
     case WM_APP_DONE:
         if (g_worker.joinable()) g_worker.join();
         drain_pending();
         g_busy = false;
+        if (g_reload_pending) {
+            g_reload_pending = false;
+            if (g_mm) g_mm->reload_installed();
+        }
         EnableWindow(g_input, TRUE);
         EnableWindow(g_list, TRUE);
+        refresh_dependency_warning();
+        clear_icons();
         refresh_list();
         SetFocus(g_input);
         return 0;
+    case WM_TIMER:
+        if (wp == kAutoCheckTimer) {
+            // Do not start a check while the modal Settings dialog can still
+            // change the database on the UI thread. Re-arm until it closes.
+            if (g_settings_wnd) {
+                SetTimer(hwnd, kAutoCheckTimer, 300, nullptr);
+                return 0;
+            }
+            KillTimer(hwnd, kAutoCheckTimer);
+            if (!g_busy && g_mm && g_mm->update_check_due()) start_command("check");
+            return 0;
+        }
+        break;
     case WM_CLOSE:
         if (g_busy) {
             append_log("A command is still running; wait for it before closing.");
@@ -1060,14 +1774,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 int run_ui(ModManager& mm) {
     g_mm = &mm;
     g_busy = false;
+    g_reload_pending = false;
     g_only_updates = false;
     g_sort_mode = 0;
     g_selected_ids.clear();
+    g_selected_folders.clear();
     g_row_ids.clear();
     g_row_names.clear();
     g_row_meta.clear();
     g_row_folders.clear();
     g_row_updates.clear();
+    g_row_icon_paths.clear();
+    g_row_mod_ids.clear();
+    g_row_enabled.clear();
+    g_activation.clear();
+    g_dependency_warning.clear();
+    g_dependency_signature.clear();
     clear_icons();
 
     SetProcessDPIAware();
@@ -1075,13 +1797,7 @@ int run_ui(ModManager& mm) {
     g_font_brand = make_font(12, FW_BOLD);
     g_font_body = make_font(10, FW_NORMAL);
     g_font_small = make_font(8, FW_NORMAL);
-    g_bg_brush = CreateSolidBrush(RGB(246, 247, 249));
-    g_card_brush = CreateSolidBrush(RGB(255, 255, 255));
-    g_selected_brush = CreateSolidBrush(RGB(255, 242, 234));
-    g_border_brush = CreateSolidBrush(RGB(220, 225, 232));
-    g_accent_brush = CreateSolidBrush(RGB(224, 100, 43));
-    g_brand_brush = CreateSolidBrush(kBrand);
-    g_brand_soft_brush = CreateSolidBrush(kBrandSoft);
+    apply_theme(mm.config().dark_mode, nullptr);
 
     HINSTANCE hi = GetModuleHandleW(nullptr);
     WNDCLASSW wc{};
@@ -1101,7 +1817,13 @@ int run_ui(ModManager& mm) {
                              wr.bottom - wr.top, nullptr, nullptr, hi, nullptr);
     if (!w) return 1;
     ShowWindow(w, SW_SHOW);
+    start_watcher(mm.config().data_dir);
+    // Close the gap between the initial load and the watch starting.
+    if (mm.reload_installed()) refresh_list();
     SetFocus(g_input);
+    // Give the first paint a moment, then run the daily check without blocking
+    // the UI thread. The timer fires once per launch only.
+    if (mm.update_check_due()) SetTimer(w, kAutoCheckTimer, 300, nullptr);
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -1121,20 +1843,17 @@ int run_ui(ModManager& mm) {
         }
     }
 
+    stop_watcher();
     clear_icons();
-    for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input, g_add,
-                   g_list, g_log, g_update, g_remove, g_update_all, g_settings_btn,
-                   g_select_all, g_clear, g_details, g_status, g_count,
+    g_edit_placeholders.clear();
+    g_settings_wnd = nullptr;
+    g_set_dark = nullptr;        for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input, g_add,
+                   g_list, g_empty, g_log, g_update, g_remove, g_update_all, g_settings_btn,
+                   g_select_all, g_clear, g_copy, g_details, g_status, g_count,
                    g_activity_label}) {
         (void)b;
     }
-    DeleteObject(g_brand_soft_brush);
-    DeleteObject(g_brand_brush);
-    DeleteObject(g_accent_brush);
-    DeleteObject(g_border_brush);
-    DeleteObject(g_selected_brush);
-    DeleteObject(g_card_brush);
-    DeleteObject(g_bg_brush);
+    destroy_theme_brushes();
     DeleteObject(g_font_small);
     DeleteObject(g_font_body);
     DeleteObject(g_font_brand);

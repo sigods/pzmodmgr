@@ -1,9 +1,12 @@
 # Firefox add-on
 
 Right-click a Project Zomboid Workshop item or collection and choose
-**Add to PZ Mod Manager**. The add-on sends the URL to the native host, which
-runs the same `add` command as the CLI and installs into the real
-`~/Zomboid/mods` folder (or `%USERPROFILE%\Zomboid\mods` on Windows).
+**Add or update in PZ Mod Manager**. The add-on sends the URL to the native
+host, which installs a new item or checks an installed one for an update. It
+installs into the real `~/Zomboid/mods` folder (or
+`%USERPROFILE%\Zomboid\mods` on Windows). The action is always present on
+Workshop pages; the host decides whether to add or update, so the menu never
+shows a stale state.
 
 ## Linux setup
 

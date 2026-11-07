@@ -1,66 +1,183 @@
 #include "core/commands.hpp"
 #include "core/paths.hpp"
+#include "core/text.hpp"
 #include "core/url.hpp"
-#include <algorithm>
-#include <sstream>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace pz {
 namespace {
 
-std::vector<std::uint64_t> parse_ids(const std::string& arg) {
-    std::istringstream in(arg);
-    std::vector<std::uint64_t> ids;
-    std::string token;
-    while (in >> token) {
-        auto id = parse_workshop_id(token);
-        if (!id) return {};
-        if (std::find(ids.begin(), ids.end(), *id) == ids.end()) ids.push_back(*id);
+struct BatchCounts {
+    int ok = 0;
+    int failed = 0;
+};
+
+template <typename Fn>
+BatchCounts apply_ids(const std::vector<std::uint64_t>& ids, const LogFn& log,
+                      bool log_each, Fn fn) {
+    BatchCounts counts;
+    for (auto id : ids) {
+        auto r = fn(id);
+        if (log_each) log(std::to_string(id) + ": " + r.message);
+        if (r.ok) ++counts.ok;
+        else ++counts.failed;
     }
-    return ids;
+    return counts;
 }
+
+Result add_workshop_ids(ModManager& mm, const std::vector<std::uint64_t>& ids,
+                        const LogFn& log) {
+    if (ids.size() == 1) return mm.add(std::to_string(ids.front()), log);
+
+    const auto counts = apply_ids(ids, log, true,
+        [&](std::uint64_t id) { return mm.add(std::to_string(id), log); });
+    std::string msg = "Installed " + std::to_string(counts.ok) + " of " +
+                      std::to_string(ids.size()) + " Workshop item(s)";
+    if (counts.failed != 0) msg += ", " + std::to_string(counts.failed) + " failed";
+    return {counts.failed == 0, msg};
+}
+
+Result add_workshop_input(ModManager& mm, const std::string& arg, const LogFn& log) {
+    auto ids = parse_workshop_ids(arg);
+    if (ids.empty()) return {false, "No Workshop ID found in: " + arg};
+    return add_workshop_ids(mm, ids, log);
+}
+
+int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+std::string decode_folder_token(const std::string& token) {
+    if (token.size() < 3 || token[0] != 'f' || token[1] != ':' ||
+        (token.size() - 2) % 2 != 0)
+        return {};
+    std::string value;
+    for (std::size_t i = 2; i + 1 < token.size(); i += 2) {
+        const int high = hex_digit(token[i]);
+        const int low = hex_digit(token[i + 1]);
+        if (high < 0 || low < 0) return {};
+        value += static_cast<char>((high << 4) | low);
+    }
+    return value;
+}
+
 }  // namespace
 
 Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
-    std::istringstream ss(line);
-    std::string cmd;
-    ss >> cmd;
-    std::string arg;
-    std::getline(ss >> std::ws, arg);
+    const auto [cmd, arg] = split_first_word(line);
 
-    if (cmd == "add") return mm.add(arg, log);
+    if (cmd == "add") return add_workshop_input(mm, arg, log);
     if (cmd == "remove") {
-        auto ids = parse_ids(arg);
+        auto ids = parse_workshop_ids(arg);
         if (ids.empty()) return {false, "expected a Workshop ID"};
-        if (ids.size() == 1) return mm.remove(ids[0], log);
+        if (ids.size() == 1) return mm.remove(ids.front(), log);
 
-        int removed = 0;
-        for (auto id : ids)
-            if (mm.remove(id, log).ok) ++removed;
-        const int missing = static_cast<int>(ids.size()) - removed;
-        std::string msg = "Removed " + std::to_string(removed) + " of " +
+        const auto counts = apply_ids(ids, log, false,
+            [&](std::uint64_t id) { return mm.remove(id, log); });
+        const int missing = static_cast<int>(ids.size()) - counts.ok;
+        std::string msg = "Removed " + std::to_string(counts.ok) + " of " +
                           std::to_string(ids.size()) + " selected mod(s)";
         if (missing != 0) msg += ", " + std::to_string(missing) + " not installed";
         return {missing == 0, msg};
     }
     if (cmd == "check") return mm.check_updates(log);
+    if (cmd == "targets") {
+        auto targets = mm.activation_targets();
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            const auto& t = targets[i];
+            log(std::to_string(i) + ": " + t.label + " (" +
+                std::to_string(t.mod_ids.size()) + " mod ID(s))");
+        }
+        return {true, std::to_string(targets.size()) +
+                      " activation target(s); use enable/disable <index> <Workshop IDs>"};
+    }
+    if (cmd == "set-enabled") {
+        const auto [index_text, rest] = split_first_word(arg);
+        const auto [state, tokens] = split_first_word(rest);
+        if (index_text.empty() || (state != "on" && state != "off"))
+            return {false, "expected: set-enabled <index> on|off [w:ID|f:folder]..."};
+        if (index_text.find_first_not_of("0123456789") != std::string::npos)
+            return {false, "unknown target index: " + index_text};
+        auto targets = mm.activation_targets();
+        const unsigned long index = std::strtoul(index_text.c_str(), nullptr, 10);
+        if (index >= targets.size())
+            return {false, "unknown target index: " + index_text};
+
+        std::vector<std::uint64_t> ids;
+        std::vector<std::string> folders;
+        std::string remaining = tokens;
+        while (!remaining.empty()) {
+            const auto [token, tail] = split_first_word(remaining);
+            remaining = tail;
+            if (token.compare(0, 2, "w:") == 0) {
+                const std::string number = token.substr(2);
+                if (number.empty() ||
+                    number.find_first_not_of("0123456789") != std::string::npos)
+                    return {false, "bad Workshop ID token: " + token};
+                ids.push_back(std::strtoull(number.c_str(), nullptr, 10));
+            } else if (token.compare(0, 2, "f:") == 0) {
+                const std::string folder = decode_folder_token(token);
+                if (folder.empty()) return {false, "bad folder token: " + token};
+                folders.push_back(folder);
+            } else {
+                return {false, "unknown token: " + token};
+            }
+        }
+        const auto& target = targets[index];
+        return mm.set_selection_enabled(target.kind, target.name, ids, folders,
+                                        state == "on", log);
+    }
+    if (cmd == "enable" || cmd == "disable") {
+        const auto [index_text, ids_text] = split_first_word(arg);
+        auto ids = parse_workshop_ids(ids_text);
+        if (index_text.empty() || ids.empty())
+            return {false, "expected: " + cmd + " <target index> <Workshop ID>..."};
+        if (index_text.find_first_not_of("0123456789") != std::string::npos)
+            return {false, "unknown target index: " + index_text};
+        auto targets = mm.activation_targets();
+        const unsigned long index = std::strtoul(index_text.c_str(), nullptr, 10);
+        if (index >= targets.size())
+            return {false, "unknown target index: " + index_text};
+        const auto& target = targets[index];
+        return mm.set_mods_enabled(target.kind, target.name, ids, cmd == "enable", log);
+    }
+    if (cmd == "share") {
+        const auto [index_text, ignored] = split_first_word(arg);
+        (void)ignored;
+        if (index_text.empty() || index_text.find_first_not_of("0123456789") != std::string::npos)
+            return {false, "expected: share <target index>"};
+        auto targets = mm.activation_targets();
+        const unsigned long index = std::strtoul(index_text.c_str(), nullptr, 10);
+        if (index >= targets.size())
+            return {false, "unknown target index: " + index_text};
+        const auto& target = targets[index];
+        const auto ids = mm.workshop_ids_for(target);
+        std::string list;
+        for (auto id : ids) {
+            if (!list.empty()) list += ' ';
+            list += std::to_string(id);
+        }
+        log(list.empty() ? std::string("(no Workshop IDs)") : list);
+        return {true, std::to_string(ids.size()) + " Workshop ID(s) from " + target.label +
+                      "; paste the list into Add on the other instance"};
+    }
     if (cmd == "update") {
         if (arg.empty()) return mm.update_all(log);
-        auto ids = parse_ids(arg);
+        auto ids = parse_workshop_ids(arg);
         if (ids.empty()) return {false, "expected a Workshop ID"};
-        if (ids.size() == 1) return mm.update_one(ids[0], log);
+        if (ids.size() == 1) return mm.update_one(ids.front(), log);
 
-        int updated = 0, failed = 0;
-        for (auto id : ids) {
-            auto r = mm.update_one(id, log);
-            log(std::to_string(id) + ": " + r.message);
-            if (r.ok) ++updated;
-            else ++failed;
-        }
-        std::string msg = "Updated " + std::to_string(updated) + " of " +
+        const auto counts = apply_ids(ids, log, true,
+            [&](std::uint64_t id) { return mm.update_one(id, log); });
+        std::string msg = "Updated " + std::to_string(counts.ok) + " of " +
                           std::to_string(ids.size()) + " selected mod(s)";
-        if (failed != 0) msg += ", " + std::to_string(failed) + " failed";
-        return {failed == 0, msg};
+        if (counts.failed != 0) msg += ", " + std::to_string(counts.failed) + " failed";
+        return {counts.failed == 0, msg};
     }
     if (cmd == "list") {
         auto mods = mm.list();
@@ -69,20 +186,34 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         return {true, std::to_string(mods.size()) + " mod(s)"};
     }
     if (cmd == "config") {
-        std::istringstream a(arg);
-        std::string key, value;
-        a >> key;
-        std::getline(a >> std::ws, value);
+        const auto [key, value] = split_first_word(arg);
         auto& c = mm.config();
-        if (key == "steamcmd_exe") c.steamcmd_exe = value;
-        else if (key == "steam_user") c.steam_user = value;
-        else return {false, "unknown config key: " + key};
-        save_config(c);
+        if (key == "steamcmd_exe") {
+            c.steamcmd_exe = value;
+        } else if (key == "steam_user") {
+            c.steam_user = value;
+        } else if (key == "zomboid_dir") {
+            const fs::path dir = value.empty() ? default_config().zomboid_dir
+                                               : fs::path(value);
+            auto r = mm.set_zomboid_dir(dir);
+            if (!r.ok) return r;
+        } else if (key == "dark_mode") {
+            c.dark_mode = value == "1" || value == "on" || value == "true" ||
+                          value == "yes" || value == "dark";
+        } else if (key == "auto_enable") {
+            c.auto_enable = value == "1" || value == "on" || value == "true" ||
+                            value == "yes";
+        } else {
+            return {false, "unknown config key: " + key};
+        }
+        if (!save_config(mm.config())) return {false, "could not save config"};
         return {true, "saved " + key};
     }
 
-    // A pasted Workshop URL or numeric id with no command prefix means add.
-    if (parse_workshop_id(line)) return mm.add(line, log);
+    // A pasted Workshop URL, numeric id, or whitespace-separated list with no
+    // command prefix means add.
+    auto ids = parse_workshop_ids(line);
+    if (!ids.empty()) return add_workshop_ids(mm, ids, log);
 
     return {false, "unknown command: " + cmd};
 }

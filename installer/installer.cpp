@@ -21,13 +21,13 @@
 #include <vector>
 
 #ifndef PZ_VERSION
-#define PZ_VERSION L"0.2.0"
+#define PZ_VERSION L"0.2.1"
 #endif
 
 namespace {
 
 constexpr wchar_t kAppName[] = L"PZ Mod Manager";
-constexpr wchar_t kVersion[] = L"0.2.0";
+constexpr wchar_t kVersion[] = L"0.2.1";
 constexpr wchar_t kUninstallKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PZModManager";
 constexpr wchar_t kFirefoxHostKey[] = L"Software\\Mozilla\\NativeMessagingHosts\\pzmodmgr";
@@ -244,6 +244,56 @@ std::string to_utf8(const std::wstring& text) {
     WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), n,
                         nullptr, nullptr);
     return out;
+}
+
+std::wstring from_utf8(const std::string& text) {
+    if (text.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                      nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring out(static_cast<std::size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), n);
+    return out;
+}
+
+std::string read_utf8_file(const std::wstring& path) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+    LARGE_INTEGER size{};
+    std::string out;
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart <= 1024 * 1024) {
+        out.resize(static_cast<std::size_t>(size.QuadPart));
+        DWORD total = 0;
+        while (total < out.size()) {
+            DWORD got = 0;
+            if (!ReadFile(file, out.data() + total,
+                          static_cast<DWORD>(out.size() - total), &got, nullptr) ||
+                got == 0)
+                break;
+            total += got;
+        }
+        out.resize(total);
+    }
+    CloseHandle(file);
+    return out;
+}
+
+std::string config_value(const std::string& text, const std::string& key) {
+    const std::string prefix = key + "=";
+    std::string value;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t end = text.find('\n', start);
+        const std::size_t stop = end == std::string::npos ? text.size() : end;
+        std::string line = text.substr(start, stop - start);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind(prefix, 0) == 0) value = line.substr(prefix.size());
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return value;
 }
 
 std::string json_escape(const std::string& in) {
@@ -628,22 +678,48 @@ bool app_is_running() {
     return FindWindowW(L"PZModMgrWnd", nullptr) != nullptr;
 }
 
-// A fresh install can use public Workshop items immediately. Existing config
-// is never overwritten, and users can change the account in Settings.
-void seed_default_config(std::wstring& warning) {
+std::wstring default_zomboid_dir() {
     const std::wstring profile = known_folder(FOLDERID_Profile);
-    if (profile.empty()) return;
-    const std::wstring data_dir = join(join(profile, L"Zomboid"), L"pzmodmgr");
-    const std::wstring config = join(data_dir, L"config.ini");
-    if (file_exists(config)) return;
+    return profile.empty() ? L"" : join(profile, L"Zomboid");
+}
 
-    std::wstring error;
-    if (!ensure_dir(data_dir, error)) {
-        warning += error + L"\r\n";
+// The installed build reads config.ini next to pzmodmgr.exe. Seed that file
+// with the cache path chosen at install time, preserving an existing Steam
+// account/steamcmd setting. No bootstrap file is created under %USERPROFILE%.
+void seed_install_config(const std::wstring& install_dir, const std::wstring& requested,
+                         std::wstring& warning) {
+    const std::wstring config = join(install_dir, L"config.ini");
+    const std::wstring profile = known_folder(FOLDERID_Profile);
+    const std::wstring legacy = profile.empty()
+        ? L"" : join(join(join(profile, L"Zomboid"), L"pzmodmgr"), L"config.ini");
+
+    std::wstring source;
+    if (file_exists(config)) source = config;
+    else if (!legacy.empty() && file_exists(legacy)) source = legacy;
+    const std::string text = source.empty() ? std::string{} : read_utf8_file(source);
+    const std::string steamcmd = config_value(text, "steamcmd_exe");
+    std::string user = config_value(text, "steam_user");
+    const std::string old_zomboid = config_value(text, "zomboid_dir");
+    std::string dark_mode = config_value(text, "dark_mode");
+    dark_mode = dark_mode == "1" || dark_mode == "on" || dark_mode == "true"
+        ? "1" : "0";
+
+    std::wstring zomboid = requested;
+    if (zomboid.empty() && !old_zomboid.empty()) zomboid = from_utf8(old_zomboid);
+    if (zomboid.empty()) zomboid = default_zomboid_dir();
+    zomboid = full_path(trim(zomboid));
+    if (zomboid.empty() || PathIsRootW(zomboid.c_str())) {
+        warning += L"Could not determine a usable Zomboid cache folder.\r\n";
         return;
     }
-    if (!write_utf8_file(config, "steamcmd_exe=\nsteam_user=anonymous\n", error))
-        warning += error + L"\r\n";
+    if (user.empty()) user = "anonymous";
+
+    const std::string body = "steamcmd_exe=" + steamcmd +
+                             "\nsteam_user=" + user +
+                             "\nzomboid_dir=" + to_utf8(zomboid) +
+                             "\ndark_mode=" + dark_mode + "\n";
+    std::wstring error;
+    if (!write_utf8_file(config, body, error)) warning += error + L"\r\n";
 }
 
 std::wstring default_install_dir() {
@@ -717,7 +793,8 @@ bool extract_payload(const std::wstring& dir, bool firefox, bool chromium, bool 
 }
 
 bool perform_install(const std::wstring& raw_dir, bool start_menu, bool desktop,
-                     bool firefox, bool chromium, bool silent, std::wstring& warning) {
+                     bool firefox, bool chromium, const std::wstring& zomboid_dir,
+                     bool silent, std::wstring& warning) {
     const std::wstring dir = full_path(trim(raw_dir));
     std::wstring reason;
     if (!safe_install_dir(dir, reason)) {
@@ -764,7 +841,7 @@ bool perform_install(const std::wstring& raw_dir, bool start_menu, bool desktop,
         if (resource) estimated_kb += (SizeofResource(g_instance, resource) + 1023) / 1024;
     }
     write_uninstall_registry(dir, uninstaller, estimated_kb, warning);
-    seed_default_config(warning);
+    seed_install_config(dir, zomboid_dir, warning);
 
     if (!silent) {
         SendMessageW(g_progress, PBM_SETPOS, needed + 1, 0);
@@ -834,7 +911,8 @@ void begin_install() {
 
     std::wstring warning;
     const bool ok = perform_install(dir, checked(g_startmenu), checked(g_desktop),
-                                    checked(g_firefox), checked(g_chrome), false, warning);
+                                    checked(g_firefox), checked(g_chrome), L"", false,
+                                    warning);
 
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
     g_installing = false;
@@ -1231,6 +1309,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     bool uninstall = false;
     bool silent = false;
     std::wstring destination;
+    std::wstring zomboid;
 
     const std::wstring self = module_path();
     if (_wcsicmp(file_of(self).c_str(), L"uninstall.exe") == 0) uninstall = true;
@@ -1245,6 +1324,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             silent = true;
         } else if (_wcsnicmp(arg.c_str(), L"/D=", 3) == 0) {
             destination = trim(arg.substr(3));
+        } else if (_wcsnicmp(arg.c_str(), L"/ZOMBOIDDIR=", 12) == 0) {
+            zomboid = trim(arg.substr(12));
         }
     }
     if (argv) LocalFree(argv);
@@ -1255,7 +1336,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     } else if (silent) {
         const std::wstring dir = destination.empty() ? default_install_dir() : destination;
         std::wstring warning;
-        result = perform_install(dir, true, false, true, true, true, warning) ? 0 : 1;
+        result = perform_install(dir, true, false, true, true, zomboid, true, warning)
+                     ? 0 : 1;
     } else {
         result = run_gui();
     }

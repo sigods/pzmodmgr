@@ -1,9 +1,12 @@
 # Chrome extension
 
 Right-click a Project Zomboid Workshop item or collection and choose
-**Add to PZ Mod Manager**. The extension sends the page URL to the same native
-host as the Firefox add-on, which installs into the real
-`~/Zomboid/mods` folder (or `%USERPROFILE%\Zomboid\mods` on Windows).
+**Add or update in PZ Mod Manager**. The extension sends the page URL to the
+same native host as the Firefox add-on, which installs a new item or checks an
+installed one for an update. It installs into the real `~/Zomboid/mods` folder
+(or `%USERPROFILE%\Zomboid\mods` on Windows). The action is always present on
+Workshop pages; the host decides whether to add or update, so the menu never
+shows a stale state.
 
 ## Load the extension
 

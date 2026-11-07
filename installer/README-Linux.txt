@@ -1,4 +1,4 @@
-PZ Mod Manager 0.2.0 for Linux
+PZ Mod Manager 0.2.1 for Linux
 ==============================
 
 PZ Mod Manager installs Project Zomboid Steam Workshop items and collections
@@ -13,7 +13,7 @@ Install
 -------
 Run the self-contained installer:
 
-    sh PZModManager-0.2.0-linux-x86_64.sh
+    sh PZModManager-0.2.1-linux-x86_64.sh
 
 It installs for the current user (no sudo) into:
 
@@ -33,7 +33,14 @@ Options:
     --no-menu         do not create the application-menu entry
     --no-browsers     do not register Firefox/Chrome native hosts
     --prefix=DIR      install into a different directory
+    --zomboid-dir=DIR Zomboid cache folder (default: ~/Zomboid)
     --uninstall       run the installed uninstaller
+
+Update
+------
+Run a newer installer. It detects the existing ~/.local/bin/pzmodmgr link and
+updates that folder in place. The existing config.ini, Zomboid folder, mods,
+and saved state are kept, so there is no need to reconfigure the app.
 
 Uninstall
 ---------
@@ -41,24 +48,27 @@ Run the uninstaller:
 
     ~/.local/share/pzmodmgr/uninstall.sh
 
-or rerun the original installer with --uninstall. Your mods and settings under
-~/Zomboid are kept.
+or rerun the original installer with --uninstall. Your mods and state under
+the Zomboid folder are kept; the installed app and its config.ini are removed.
 
 First run
 ---------
-The app downloads Valve's official steamcmd into:
+The app downloads Valve's official steamcmd into the configured Zomboid
+folder:
 
-    ~/Zomboid/pzmodmgr/steamcmd
+    <zomboid-dir>/pzmodmgr/steamcmd
 
-A fresh install seeds `~/Zomboid/pzmodmgr/config.ini` with "anonymous", so
-public Workshop items work without opening Settings. Change the Steam username
-in Settings for restricted items. No password is stored; steamcmd uses its
-cached login.
+The installer writes `config.ini` next to the executable with the cache folder
+chosen during installation and the "anonymous" Steam user, so public Workshop
+items work without opening Settings. No bootstrap config is created in the
+default Zomboid folder. Change the Steam username in Settings for restricted
+items. No password is stored; steamcmd uses its cached login.
 
 Downloaded files are moved out of the steam cache into the mods folder, so
-they are not stored twice. Existing mod folders are backed up under:
-
-    ~/Zomboid/pzmodmgr/backups
+they are not stored twice. When a version changes, the old folder is moved
+aside under ~/Zomboid/pzmodmgr/backups only for the swap, then deleted after
+the new files are in place. A mod already present at the same version is left
+untouched and simply becomes tracked.
 
 Browser add-ons
 ---------------

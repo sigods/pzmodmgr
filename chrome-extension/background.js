@@ -6,7 +6,8 @@ function isWorkshop(url) {
     const parsed = new URL(url);
     const id = parsed.searchParams.get("id");
     return parsed.hostname === "steamcommunity.com" &&
-           parsed.pathname === "/sharedfiles/filedetails/" &&
+           (parsed.pathname === "/sharedfiles/filedetails/" ||
+            parsed.pathname === "/workshop/filedetails/") &&
            /^\d+$/.test(id || "");
   } catch (error) {
     return false;
@@ -27,15 +28,21 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "pzmodmgr-add-page",
-      title: "Add to PZ Mod Manager",
+      title: "Add or update in PZ Mod Manager",
       contexts: ["page"],
-      documentUrlPatterns: ["*://steamcommunity.com/sharedfiles/filedetails/*"]
+      documentUrlPatterns: [
+        "*://steamcommunity.com/sharedfiles/filedetails/*",
+        "*://steamcommunity.com/workshop/filedetails/*"
+      ]
     });
     chrome.contextMenus.create({
       id: "pzmodmgr-add-link",
-      title: "Add to PZ Mod Manager",
+      title: "Add or update in PZ Mod Manager",
       contexts: ["link"],
-      targetUrlPatterns: ["*://steamcommunity.com/sharedfiles/filedetails/*"]
+      targetUrlPatterns: [
+        "*://steamcommunity.com/sharedfiles/filedetails/*",
+        "*://steamcommunity.com/workshop/filedetails/*"
+      ]
     });
   });
 });
@@ -47,7 +54,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     return;
   }
 
-  notify("PZ Mod Manager", "Adding Workshop item...");
+  notify("PZ Mod Manager", "Installing or updating Workshop item...");
   chrome.runtime.sendNativeMessage(HOST, { url }, (response) => {
     if (chrome.runtime.lastError) {
       notify("PZ Mod Manager failed", chrome.runtime.lastError.message);

@@ -25,6 +25,15 @@ std::uint64_t fetch_remote_time_updated(std::uint64_t item_id);
 // Exposed for tests; returns 0 when the field is missing or invalid.
 std::uint64_t parse_published_file_time_updated(const std::string& json);
 
+// Queries the item's own result code from GetPublishedFileDetails: 1 = OK,
+// 9 = not found (removed or private), 15 = access denied. 0 means the API could
+// not be reached. Anonymous steamcmd can only download items that return 1.
+std::uint32_t fetch_published_file_result(std::uint64_t item_id);
+
+// Parses the per-item result out of a GetPublishedFileDetails JSON response.
+// Exposed for tests; returns 0 when the field is missing or invalid.
+std::uint32_t parse_published_file_result(const std::string& json);
+
 // Returns the child item ids of a collection (empty if not a collection).
 std::vector<std::uint64_t> fetch_collection_items(std::uint64_t collection_id);
 

@@ -1,4 +1,4 @@
-PZ Mod Manager 0.2.0 for Windows
+PZ Mod Manager 0.2.1 for Windows
 ================================
 
 PZ Mod Manager installs Project Zomboid Steam Workshop items and collections
@@ -11,7 +11,7 @@ installs of Project Zomboid.
 
 Installer
 ---------
-Run PZModManager-0.2.0-win64-setup.exe. It installs for the current Windows
+Run PZModManager-0.2.1-win64-setup.exe. It installs for the current Windows
 user, so no administrator rights are needed. The default location is:
 
     %LOCALAPPDATA%\Programs\PZModManager
@@ -24,7 +24,8 @@ Options:
   * Launch PZ Mod Manager
 
 Uninstall from Settings > Apps > Installed apps > PZ Mod Manager. Your mods
-and settings under %USERPROFILE%\Zomboid are kept.
+and state under %USERPROFILE%\Zomboid are kept; the app and its config.ini are
+removed.
 
 Portable build
 --------------
@@ -37,16 +38,18 @@ The app downloads Valve's official steamcmd into:
 
     %USERPROFILE%\Zomboid\pzmodmgr\steamcmd
 
-A fresh install seeds `%USERPROFILE%\Zomboid\pzmodmgr\config.ini` with
-"anonymous", so public Workshop items work without opening Settings. Change
+The setup writes `config.ini` next to pzmodmgr.exe with the Zomboid cache
+folder and the "anonymous" Steam user, so public Workshop items work without
+opening Settings. No bootstrap config is created under %USERPROFILE%. Change
 the Steam username in Settings for restricted items. No password is stored;
-steamcmd uses its cached login. If a password or Steam Guard prompt is needed,
-run steamcmd manually once, then try again.
+steamcmd uses its cached login. If a named account needs a password or Steam
+Guard prompt, run steamcmd manually once, then try again.
 
 Downloaded files are moved out of the steam cache into the mods folder, so
-they are not stored twice. Existing mod folders are backed up under:
-
-    %USERPROFILE%\Zomboid\pzmodmgr\backups
+they are not stored twice. When a version changes, the old folder is moved
+aside under %USERPROFILE%\Zomboid\pzmodmgr\backups only for the swap, then
+deleted after the new files are in place. A mod already present at the same
+version is left untouched and simply becomes tracked.
 
 Browser add-ons
 ---------------
@@ -73,6 +76,9 @@ Command line
   pzmodmgr.exe remove <id ...>
   pzmodmgr.exe list
   pzmodmgr.exe config steam_user <name>
+
+For a custom Zomboid cache folder, run the setup with
+`/ZOMBOIDDIR=C:\absolute\path` (or change it later in Settings).
 
 A bare Workshop URL or ID also acts as add. Updating uses the Steam Web API to
 skip unchanged mods. API calls and the one-time steamcmd download use curl.exe

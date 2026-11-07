@@ -1,18 +1,34 @@
 cmake_minimum_required(VERSION 3.16)
-project(pzmodmgr VERSION 0.2.0 LANGUAGES CXX)
+project(pzmodmgr VERSION 0.2.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Threads REQUIRED)
 
+# GCC/Clang release builds (Linux and MinGW) use size optimization and section
+# GC. GCC's -O3 inlining is a major part of this app's binary size; -Os plus
+# dead-section removal cuts both executables substantially. MinGW benefits most
+# because it links libstdc++ statically. Disable this option to build a baseline
+# with the toolchain's normal Release flags for benchmarking. LTO was measured
+# as larger than this setup on Linux, so it is intentionally not used.
+option(PZMODMGR_SIZE_OPT "Optimize GCC/Clang release builds for size" ON)
+if(PZMODMGR_SIZE_OPT AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
+   (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32))
+  set(CMAKE_CXX_FLAGS_RELEASE
+      "-Os -DNDEBUG -ffunction-sections -fdata-sections -fno-rtti")
+  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-Wl,--gc-sections")
+endif()
+
 add_library(pzcore STATIC
   src/core/paths.cpp
+  src/core/activation.cpp
   src/core/url.cpp
   src/core/steamcmd.cpp
   src/core/mod_info.cpp
   src/core/mod_manager.cpp
   src/core/commands.cpp)
 target_include_directories(pzcore PUBLIC src)
+target_link_libraries(pzcore PUBLIC Threads::Threads)
 
 add_executable(pzmodmgr src/main.cpp src/ui/mod_icon.cpp)
 target_include_directories(pzmodmgr PRIVATE third_party)

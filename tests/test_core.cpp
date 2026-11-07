@@ -5,11 +5,13 @@
 #include "core/paths.hpp"
 #include "core/steamcmd.hpp"
 #include "core/url.hpp"
+#include "ui/ui.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -59,11 +61,23 @@ void test_parse_workshop_id() {
 
     const char* url = "https://steamcommunity.com/sharedfiles/filedetails/?id=123456789&searchtext=x";
     check(pz::parse_workshop_id(url).value_or(0) == 123456789, "workshop url");
+    const char* workshop_url =
+        "https://steamcommunity.com/workshop/filedetails/?id=3171167894";
+    check(pz::parse_workshop_id(workshop_url).value_or(0) == 3171167894,
+          "workshop/filedetails url");
 
     check(!pz::parse_workshop_id("").has_value(), "empty input rejected");
     check(!pz::parse_workshop_id("no id here").has_value(), "text without id rejected");
     check(!pz::parse_workshop_id("id=abc").has_value(), "non-numeric id rejected");
     check(!pz::parse_workshop_id("123456789012345678901").has_value(), "overlong id rejected");
+
+    auto multi = pz::parse_workshop_ids(
+        "123\t456\nhttps://steamcommunity.com/sharedfiles/filedetails/?id=789 123");
+    check(multi.size() == 3 && multi[0] == 123 && multi[1] == 456 && multi[2] == 789,
+          "multiple IDs parsed in order and deduplicated");
+    check(pz::parse_workshop_ids("   ").empty(), "empty batch has no IDs");
+    check(pz::parse_workshop_ids("123 not-an-id").empty(),
+          "a bad token rejects the whole batch");
 }
 
 void test_steamcmd_detection(const pz::fs::path& root) {
@@ -96,6 +110,88 @@ void test_builtin_steamcmd(const pz::fs::path& root) {
           "blank steamcmd setting resolves to the built-in copy");
 }
 
+void test_config_paths(const pz::fs::path& root) {
+    pz::Config cfg;
+    cfg.zomboid_dir = root / "config-default" / "Zomboid";
+    cfg.user_mods_dir = cfg.zomboid_dir / "mods";
+    cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
+    cfg.config_file = cfg.data_dir / "config.ini";
+    cfg.steamcmd_exe = pz::builtin_steamcmd_path(cfg);
+    cfg.steam_user = "config-user";
+
+    pz::ModManager mm(cfg);
+    auto log = [](const std::string&) {};
+    const auto custom = root / "custom-zomboid";
+    auto saved = pz::run_command(mm, "config zomboid_dir " + custom.string(), log);
+    check(saved.ok, "config zomboid_dir succeeds: " + saved.message);
+    check(mm.config().zomboid_dir == custom, "custom Zomboid dir applied");
+    check(mm.config().user_mods_dir == custom / "mods", "custom mods dir applied");
+    check(mm.config().data_dir == custom / "pzmodmgr", "custom data dir applied");
+    check(pz::fs::exists(custom / "mods") && pz::fs::exists(custom / "pzmodmgr"),
+          "custom Zomboid directories created");
+    check(mm.config().steamcmd_exe == pz::builtin_steamcmd_path(mm.config()),
+          "built-in steamcmd follows the custom Zomboid dir");
+    check(mm.config().config_file == cfg.config_file,
+          "config file stays at its bootstrap path");
+    check(read_file(cfg.config_file).find("zomboid_dir=" + custom.string()) !=
+              std::string::npos,
+          "config command persists the custom Zomboid dir");
+
+    pz::Config loaded;
+    loaded.config_file = cfg.config_file;
+    loaded.zomboid_dir = cfg.zomboid_dir;
+    loaded.user_mods_dir = cfg.user_mods_dir;
+    loaded.data_dir = cfg.data_dir;
+    loaded.steamcmd_exe = cfg.steamcmd_exe;
+    pz::load_config(loaded);
+    check(loaded.zomboid_dir == custom, "custom Zomboid dir loaded on restart");
+    check(loaded.user_mods_dir == custom / "mods", "custom mods dir loaded on restart");
+    check(loaded.data_dir == custom / "pzmodmgr", "custom data dir loaded on restart");
+    check(loaded.config_file == cfg.config_file, "bootstrap config path survives load");
+    check(loaded.steam_user == cfg.steam_user, "steam user loads with custom path");
+
+    const auto before = mm.config().zomboid_dir;
+    auto relative = mm.set_zomboid_dir("relative/Zomboid");
+    check(!relative.ok, "relative Zomboid dir rejected");
+    check(mm.config().zomboid_dir == before, "rejected relative path changes nothing");
+}
+
+void test_atomic_write(const pz::fs::path& root) {
+    const pz::fs::path file = root / "atomic" / "config.ini";
+    check(pz::write_text_atomic(file, "first\n"), "atomic write creates a file");
+    check(read_file(file) == "first\n", "atomic write stores the first value");
+    check(pz::write_text_atomic(file, "second\n"), "atomic write replaces a file");
+    check(read_file(file) == "second\n", "atomic write stores the replacement");
+
+    bool leftover = false;
+    std::error_code ec;
+    for (const auto& entry : pz::fs::directory_iterator(file.parent_path(), ec)) {
+        if (entry.path().filename().string().find(".tmp.") != std::string::npos)
+            leftover = true;
+    }
+    check(!ec && !leftover, "atomic write leaves no temporary file behind");
+}
+
+void test_external_reload(const pz::fs::path& root) {
+    pz::Config cfg;
+    cfg.zomboid_dir = root / "reload" / "Zomboid";
+    cfg.user_mods_dir = cfg.zomboid_dir / "mods";
+    cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
+    cfg.steamcmd_exe = pz::builtin_steamcmd_path(cfg);
+
+    pz::ModManager mm(cfg);
+    check(!mm.reload_installed(), "reload without a change reports no change");
+
+    write_file(cfg.data_dir / "installed.tsv",
+               "424242\tExternalMod\tExternal Mod\t1700000000\n");
+    check(mm.reload_installed(), "external installed.tsv change is detected");
+    auto mods = mm.list();
+    check(mods.size() == 1 && mods[0].workshop_id == 424242 &&
+              mods[0].folder == "ExternalMod",
+          "external mod appears after reload");
+    check(!mm.reload_installed(), "unchanged reload reports no change");
+}
+
 void test_read_mod_info(const pz::fs::path& root) {
     auto dir = root / "read_mod_info";
     write_file(dir / "mod.info",
@@ -125,6 +221,35 @@ void test_read_mod_info(const pz::fs::path& root) {
     info = pz::read_mod_info(b42_icon);
     check(info.has_value() && info->icon == b42_icon / "common" / "icon_file.png",
           "B42 common icon path resolved");
+
+    auto preview_fallback = root / "read_mod_info_preview";
+    write_file(preview_fallback / "mod.info",
+               "name=Preview Fallback\nid=previewfallback\n"
+               "require=\\damnlib, \\DamnLibGlass\n");
+    write_file(preview_fallback / "preview.png", "not actually decoded here");
+    info = pz::read_mod_info(preview_fallback);
+    check(info.has_value() && info->icon == preview_fallback / "preview.png",
+          "preview.png fallback resolved");
+    check(info.has_value() && info->required_ids.size() == 2 &&
+              info->required_ids[0] == "damnlib" &&
+              info->required_ids[1] == "DamnLibGlass",
+          "require IDs parsed, trimmed, and de-escaped");
+
+    auto poster_fallback = root / "read_mod_info_poster";
+    write_file(poster_fallback / "mod.info", "name=Poster Fallback\nid=posterfallback\n");
+    write_file(poster_fallback / "preview.png", "not actually decoded here");
+    write_file(poster_fallback / "poster.png", "not actually decoded here");
+    info = pz::read_mod_info(poster_fallback);
+    check(info.has_value() && info->icon == poster_fallback / "poster.png",
+          "poster.png preferred over preview.png");
+
+    auto no_glob_icon = root / "read_mod_info_no_glob_icon";
+    write_file(no_glob_icon / "mod.info", "name=No Glob Icon\nid=noglobicon\n");
+    write_file(no_glob_icon / "icon_alt.png", "not actually decoded here");
+    write_file(no_glob_icon / "preview.png", "not actually decoded here");
+    info = pz::read_mod_info(no_glob_icon);
+    check(info.has_value() && info->icon == no_glob_icon / "preview.png",
+          "icon* files are ignored; preview.png is used instead");
 
     auto versioned = root / "read_mod_info_versioned";
     write_file(versioned / "41" / "mod.info", "name=Old version\nid=old\n");
@@ -157,10 +282,43 @@ void test_read_mod_info(const pz::fs::path& root) {
     check(!pz::supports_game_version(old_build, "42.21.0"),
           "a 41-only mod is blocked on build 42");
 
-    check(pz::compare_versions("42.21.0", "42.21") == 0,
-          "missing version components compare as zero");
-    check(pz::compare_versions("42.20", "42.21.0") < 0, "older build compares lower");
-    check(pz::compare_versions("v42.22.1", "42.21.9") > 0, "v-prefixed build compares higher");
+    pz::ModInfo range_info;
+    range_info.version_min = "41.78";
+    range_info.version_max = "42.1";
+    check(pz::version_range(range_info) == "PZ 41.78-42.1", "two-sided version range formatted");
+    range_info.version_max.clear();
+    check(pz::version_range(range_info) == "PZ 41.78+", "open-ended version range formatted");
+    range_info.version_min.clear();
+    range_info.version_max = "42.1";
+    check(pz::version_range(range_info) == "PZ up to 42.1", "upper-only version range formatted");
+    check(pz::version_range(pz::ModInfo{}).empty(), "empty version range stays empty");
+}
+
+void test_missing_requirements(const pz::fs::path& root) {
+    pz::Config cfg;
+    cfg.zomboid_dir = root / "deps" / "Zomboid";
+    cfg.user_mods_dir = cfg.zomboid_dir / "mods";
+    cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
+    cfg.steamcmd_exe = pz::builtin_steamcmd_path(cfg);
+
+    write_file(cfg.data_dir / "installed.tsv", "100\tTrailers\tTrailers\t1\t1\n");
+    write_file(cfg.user_mods_dir / "Trailers" / "mod.info",
+               "name=Trailers!\nid=trailers\n"
+               "require=\\damnlib, \\damnlibGlass\n");
+
+    pz::ModManager mm(cfg);
+    auto missing = mm.missing_requirements();
+    check(missing.size() == 2, "two missing requirements detected");
+    check(!missing.empty() && missing[0].mod_name == "Trailers!" &&
+              missing[0].required_id == "damnlib",
+          "missing requirement keeps owner and Mod ID");
+
+    write_file(cfg.user_mods_dir / "damnlib" / "mod.info",
+               "name=Library\nid=DamnLib\n");
+    write_file(cfg.user_mods_dir / "damnlibGlass" / "mod.info",
+               "name=Glass\nid=damnlibglass\n");
+    check(mm.missing_requirements().empty(),
+          "present requirements match case-insensitively");
 }
 
 void test_discover_mod_roots(const pz::fs::path& root) {
@@ -217,6 +375,184 @@ void test_time_updated_parser() {
               R"({"response":{"publishedfiledetails":[{"time_updated":"123"}]}})") == 0,
           "non-numeric time_updated rejected");
     check(pz::parse_published_file_time_updated("not json") == 0, "garbage rejected");
+}
+
+void test_ui_helpers() {
+    pz::InstalledMod beta;
+    beta.workshop_id = 1;
+    beta.folder = "Beta";
+    beta.name = "Beta";
+    pz::InstalledMod alpha;
+    alpha.workshop_id = 2;
+    alpha.folder = "Alpha";
+    alpha.name = "Alpha";
+    const std::vector<pz::InstalledMod> mods{beta, alpha};
+
+    auto visible = pz::visible_mods(mods, "alp", false, 0,
+        [](std::uint64_t) { return false; });
+    check(visible.size() == 1 && visible[0].workshop_id == 2,
+          "UI filter matches name and folder case-insensitively");
+
+    visible = pz::visible_mods(mods, "", false, 0,
+        [](std::uint64_t) { return false; });
+    check(visible.size() == 2 && visible[0].workshop_id == 2,
+          "UI list sorts by name");
+
+    visible = pz::visible_mods(mods, "", true, 1,
+        [](std::uint64_t id) { return id == 1; });
+    check(visible.size() == 1 && visible[0].workshop_id == 1,
+          "UI update filter uses the update callback");
+
+    pz::MissingRequirement missing{"Owner", "Folder", "req"};
+    const auto notice = pz::dependency_notice({missing});
+    check(notice.messages.size() == 1 && notice.status.find("req") != std::string::npos,
+          "UI dependency notice reports missing requirement");
+
+    pz::ModRow mod;
+    mod.folders.push_back("Folder");
+    pz::ModInfo info;
+    info.author = "Author";
+    info.mod_version = "1.2";
+    info.version_min = "41";
+    info.version_max = "42";
+    check(pz::mod_meta(mod, &info, "43") == "Folder  |  PZ 41-42",
+          "UI metadata keeps folder and incompatible range, not author/version");
+
+    // One Workshop item may ship several folders (an old and a new variant).
+    pz::InstalledMod old_variant;
+    old_variant.workshop_id = 9;
+    old_variant.folder = "OldVariant";
+    old_variant.name = "Ladders old";
+    pz::InstalledMod new_variant = old_variant;
+    new_variant.folder = "NewVariant";
+    new_variant.name = "Ladders new";
+    new_variant.time_updated = 50;
+    visible = pz::visible_mods({old_variant, new_variant}, "", false, 0,
+        [](std::uint64_t) { return false; });
+    check(visible.size() == 1 && visible[0].folders.size() == 2 &&
+              visible[0].time_updated == 50,
+          "UI groups folders from one Workshop item into a single row");
+    mod.folders.push_back("Other");
+    check(pz::mod_meta(mod, nullptr, "43") == "2 folders: Folder, Other",
+          "UI metadata names every folder in a grouped item");
+    check(pz::join_workshop_ids({7, 42}) == "7 42",
+          "shared Workshop ID list is paste-ready");
+}
+
+void test_activation_formats(const pz::fs::path& root) {
+    const std::string block =
+        "VERSION = 1,\r\n\r\nmods\r\n{\r\n    mod = Alpha,\r\n    mod = \\Beta,\r\n}\r\n\r\nmaps\r\n{\r\n}\r\n";
+    auto ids = pz::parse_block_mod_ids(block);
+    check(ids.size() == 2 && ids[1] == "Beta",
+          "default/save block Mod IDs parsed and legacy prefix stripped");
+
+    bool changed = false;
+    const std::string out = pz::rewrite_block_mod_ids(
+        block, {"Beta", "Gamma"}, &changed);
+    check(changed, "block rewrite reports a change");
+    check(out.find("mod = Gamma,") != std::string::npos &&
+              out.find("mod = \\Gamma,") == std::string::npos &&
+              out.find("mod = Alpha") == std::string::npos,
+          "block rewrite adds and removes plain Mod IDs");
+    check(out.find("maps") != std::string::npos &&
+              out.find("\r\n") != std::string::npos,
+          "block rewrite preserves maps and CRLF line endings");
+    check(pz::parse_block_mod_ids(out) ==
+              (std::vector<std::string>{"Beta", "Gamma"}),
+          "rewritten block round-trips");
+
+    const std::string ini =
+        "PublicName=X\r\nMods=\\Alpha;\\Beta\r\nWorkshopItems=111;222\r\n"
+        "Map=Muldraugh, KY\r\n";
+    bool backslash = false;
+    auto mods = pz::parse_ini_mod_ids(ini, &backslash);
+    check(backslash && mods.size() == 2 && mods[0] == "Alpha",
+          "server Mods= parsed and backslash convention detected");
+    const std::string ini_out = pz::rewrite_ini_mods(
+        ini, {"Beta", "Gamma"}, true, &changed);
+    check(ini_out.find("Mods=\\Beta;\\Gamma") != std::string::npos,
+          "server Mods= rewritten with the file's convention");
+    check(ini_out.find("WorkshopItems=111;222") != std::string::npos &&
+              ini_out.find("Map=Muldraugh") != std::string::npos,
+          "server rewrite leaves other ini lines alone");
+    check(pz::parse_ini_workshop_ids(ini_out) ==
+              (std::vector<std::uint64_t>{111, 222}),
+          "server WorkshopItems= parsed");
+
+    const pz::fs::path z = root / "ActivationZomboid";
+    write_file(z / "mods" / "default.txt",
+               "VERSION = 1,\n\nmods\n{\n}\n\nmaps\n{\n}\n");
+    write_file(z / "Saves" / "Apocalypse" / "Save1" / "players.db", "");
+    write_file(z / "Server" / "servertest.ini", "Mods=\nWorkshopItems=\n");
+    auto targets = pz::discover_activation_targets(z, "42.21.0");
+    check(targets.size() == 3, "default, save, and server targets discovered");
+
+    auto find_target = [&](pz::ActivationKind kind, const std::string& name) -> pz::ActivationTarget* {
+        for (auto& target : targets)
+            if (target.kind == kind && target.name == name) return &target;
+        return nullptr;
+    };
+
+    auto* defaults = find_target(pz::ActivationKind::Default, "");
+    check(defaults != nullptr && pz::write_activation_target(*defaults, {"Foo"}, {}, true),
+          "default.txt enable writes");
+    check(read_file(defaults->path).find("mod = Foo,") != std::string::npos,
+          "default.txt contains a plain enabled Mod ID");
+
+    // A file corrupted by the old backslash writer is repaired on discovery,
+    // before the next enable/disable action.
+    write_file(defaults->path,
+               "VERSION = 1,\n\nmods\n{\n    mod = \\Plain,\n}\n");
+    targets = pz::discover_activation_targets(z, "42.21.0");
+    defaults = find_target(pz::ActivationKind::Default, "");
+    std::string repaired;
+    if (defaults) repaired = read_file(defaults->path);
+    check(defaults != nullptr && defaults->mod_ids ==
+              (std::vector<std::string>{"Plain"}) &&
+              repaired.find("mod = Plain,") != std::string::npos &&
+              repaired.find("mod = \\Plain,") == std::string::npos,
+          "default.txt discovery repairs backslash IDs to plain form");
+    check(defaults != nullptr && pz::write_activation_target(*defaults, {"Foo"}, {}, true),
+          "default.txt repair enable writes");
+    check(read_file(defaults->path).find("mod = Foo,") != std::string::npos,
+          "default.txt still accepts a plain Mod ID after repair");
+
+    auto* save = find_target(pz::ActivationKind::Save, "Apocalypse/Save1");
+    check(save != nullptr && pz::write_activation_target(*save, {"Bar"}, {}, true),
+          "save mods.txt enable writes");
+    check(read_file(save->path).find("mod = Bar,") != std::string::npos,
+          "save mods.txt uses plain Mod IDs");
+
+    auto* server = find_target(pz::ActivationKind::Server, "servertest");
+    check(server != nullptr && pz::write_activation_target(*server, {"Baz"}, {123}, true),
+          "server enable writes Mods= and WorkshopItems=");
+    const std::string server_text = read_file(server->path);
+    check(server_text.find("Mods=\\Baz") != std::string::npos,
+          "B42 server gets the backslash form: " + server_text);
+    check(server_text.find("WorkshopItems=123") != std::string::npos,
+          "server WorkshopItems= receives the Workshop ID");
+    check(pz::write_activation_target(*server, {"Baz"}, {123}, false) &&
+              read_file(server->path).find("Baz") == std::string::npos,
+          "server disable removes the Mod ID but keeps WorkshopItems");
+}
+
+void test_published_result_parser() {
+    check(pz::parse_published_file_result(
+              R"({"response":{"result":1,"resultcount":1,"publishedfiledetails":[{"publishedfileid":"1","result":1}]}})") == 1,
+          "item result parsed, not the outer call result");
+
+    check(pz::parse_published_file_result(
+              R"({"response":{"result":1,"resultcount":1,"publishedfiledetails":[{"publishedfileid":"1786325498","result":9}]}})") == 9,
+          "removed or private item reports result 9");
+
+    check(pz::parse_published_file_result(
+              R"({"response":{"result":1,"publishedfiledetails":[{"title":"result\":7","result":15}]}})") == 15,
+          "result text inside a string is ignored");
+
+    check(pz::parse_published_file_result(
+              R"({"response":{"result":1,"resultcount":0,"publishedfiledetails":[]}})") == 0,
+          "empty publishedfiledetails gives 0");
+    check(pz::parse_published_file_result("not json") == 0, "garbage rejected");
 }
 
 void test_collection_parser() {
@@ -282,6 +618,7 @@ exit "${FAKE_CURL_EXIT:-0}"
     setenv("FAKE_STEAMCMD_LOG", steam_log.c_str(), 1);
     setenv("FAKE_CURL_LOG", curl_log.c_str(), 1);
     setenv("FAKE_CURL_EXIT", "0", 1);
+    setenv("FAKE_STEAMCMD_MOD_VERSION", "1.0", 1);
 
     auto set_json_time = [](std::uint64_t t) {
         std::string json =
@@ -303,9 +640,8 @@ exit "${FAKE_CURL_EXIT:-0}"
     auto r = mm.add("https://steamcommunity.com/sharedfiles/filedetails/?id=123456789", logfn);
     check(r.ok, "add succeeds with fake steamcmd: " + r.message);
     check(pz::fs::exists(cfg.user_mods_dir / "FixtureMod" / "mod.info"), "mod folder installed");
-    check(!pz::fs::exists(cfg.data_dir / "steam_cache" / "steamapps" / "workshop" /
-                          "content" / "108600" / "123456789"),
-          "download cache moved into the mods folder");
+    check(!pz::fs::exists(cfg.data_dir / "steam_cache" / "123456789"),
+          "per-download cache removed after install");
     check(pz::fs::exists(cfg.data_dir / "installed.tsv"), "installed.tsv written");
     check(mm.list().size() == 1, "one db record after add");
     check(!mm.list().empty() && mm.list()[0].time_updated == 1700000000,
@@ -313,6 +649,39 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(read_file(curl_log).find("itemcount=1&publishedfileids[0]=123456789") != std::string::npos,
           "Steam API POST body built");
     check(mm.add("123456789", logfn).ok == false, "duplicate add rejected");
+
+    // A manual install with the same mod version is adopted instead of
+    // replaced: no backup, no duplicate copy, and remove leaves it in place.
+    setenv("FAKE_STEAMCMD_PER_ITEM", "1", 1);
+    setenv("FAKE_STEAMCMD_MOD_VERSION", "3.0", 1);
+    const auto manual_dir = cfg.user_mods_dir / "FixtureMod888";
+    write_file(manual_dir / "mod.info",
+               "id=FixtureMod888\nname=Manual Fixture\nmodversion=3.0\n");
+    write_file(manual_dir / "manual-marker.txt", "keep\n");
+    set_json_time(1700000700);
+    log.clear();
+    auto adopted = mm.add("888", logfn);
+    check(adopted.ok, "external same-version add succeeds: " + adopted.message);
+    check(pz::fs::exists(manual_dir / "manual-marker.txt"),
+          "adopted folder is left untouched");
+    check(!pz::fs::exists(cfg.data_dir / "backups"),
+          "adopted folder is not backed up");
+    auto adopted_records = mm.list();
+    auto adopted_record = std::find_if(adopted_records.begin(), adopted_records.end(),
+        [](const pz::InstalledMod& m) { return m.workshop_id == 888; });
+    check(adopted_record != adopted_records.end(), "adopted folder is tracked");
+    check(adopted_record != adopted_records.end() && !adopted_record->owned,
+          "adopted folder is marked as externally installed");
+    auto adopted_remove = mm.remove(888, logfn);
+    check(adopted_remove.ok, "external record can be removed");
+    check(pz::fs::exists(manual_dir / "manual-marker.txt"),
+          "removing the record leaves the external folder in place");
+    check(mm.list().size() == 1, "external record removed from the database");
+    pz::fs::remove_all(manual_dir);
+    unsetenv("FAKE_STEAMCMD_PER_ITEM");
+    setenv("FAKE_STEAMCMD_MOD_VERSION", "1.0", 1);
+
+    check(mm.update_check_due(), "first update check is due");
 
     // A check records update availability without downloading.
     set_json_time(1700000500);
@@ -322,6 +691,20 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(check_result.ok, "check_updates succeeds: " + check_result.message);
     check(mm.update_available(123456789), "update availability recorded");
     check(read_file(steam_log) == downloads_before_check, "check does not download");
+    check(!mm.update_check_due(), "recent update check is not due");
+    check(pz::fs::exists(cfg.data_dir / "last_check"), "last check time persisted");
+    {
+        pz::ModManager restarted(cfg);
+        check(!restarted.update_check_due(),
+              "recent update check stays suppressed after restart");
+    }
+    const auto now = static_cast<std::uint64_t>(std::time(nullptr));
+    write_file(cfg.data_dir / "last_check", std::to_string(now - 86401));
+    check(mm.update_check_due(), "update check is due after a day");
+    write_file(cfg.data_dir / "last_check", std::to_string(now + 3600));
+    check(!mm.update_check_due(), "future timestamp does not force repeated checks");
+    write_file(cfg.data_dir / "last_check", std::to_string(now - 100));
+    check(!mm.update_check_due(), "check less than a day old is not due");
 
     // Unchanged remote time: update must not call steamcmd or create a backup.
     set_json_time(1700000000);
@@ -334,14 +717,35 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(read_file(steam_log) == downloads_before, "unchanged mod not downloaded again");
     check(!pz::fs::exists(cfg.data_dir / "backups"), "unchanged mod not backed up");
 
-    // New remote time: update reinstalls once and records the new timestamp.
+    // New remote time but the same mod version: inspect the download, then keep
+    // the installed files and do not create a backup.
     set_json_time(1700000500);
+    const std::string downloads_before_same = read_file(steam_log);
+    log.clear();
     u = mm.update_all(logfn);
-    check(u.ok, "update_all with new time succeeds: " + u.message);
+    check(u.ok, "same-version update succeeds: " + u.message);
     check(mm.list().size() == 1 && mm.list()[0].time_updated == 1700000500,
-          "update records new time_updated");
-    check(read_file(steam_log).size() > downloads_before.size(), "changed mod downloaded again");
-    check(pz::fs::exists(cfg.data_dir / "backups"), "changed mod backed up before replace");
+          "same-version update records the new time_updated");
+    check(read_file(steam_log).size() > downloads_before_same.size(),
+          "same-version update still inspects the download");
+    check(!pz::fs::exists(cfg.data_dir / "backups"),
+          "same-version update does not keep a backup");
+    check(std::find(log.begin(), log.end(), "kept existing FixtureMod (version 1.0)") != log.end(),
+          "same-version update reports the kept copy");
+
+    // A real version change replaces the folder. The old copy is only kept
+    // until the move succeeds, so it is deleted again immediately.
+    setenv("FAKE_STEAMCMD_MOD_VERSION", "2.0", 1);
+    set_json_time(1700000600);
+    const std::string downloads_before_update = read_file(steam_log);
+    u = mm.update_all(logfn);
+    check(u.ok, "update_all with new version succeeds: " + u.message);
+    check(mm.list().size() == 1 && mm.list()[0].time_updated == 1700000600,
+          "version update records new time_updated");
+    check(read_file(steam_log).size() > downloads_before_update.size(),
+          "changed mod downloaded again");
+    check(!pz::fs::exists(cfg.data_dir / "backups"),
+          "successful update deletes the temporary old copy");
 
     // API failure: skip instead of blindly reinstalling.
     const std::string downloads_after_update = read_file(steam_log);
@@ -364,6 +768,8 @@ exit "${FAKE_CURL_EXIT:-0}"
     log.clear();
     auto single2 = pz::run_command(mm, "update 123456789", logfn);
     check(single2.ok, "single update succeeds: " + single2.message);
+    check(single2.message.find("Already up to date") != std::string::npos,
+          "single update reports the unchanged version: " + single2.message);
     check(mm.list().size() == 1 && mm.list()[0].time_updated == 1700000900,
           "single update records new time");
     check(read_file(steam_log).size() > downloads_before_single.size(),
@@ -375,6 +781,22 @@ exit "${FAKE_CURL_EXIT:-0}"
           "failed download reported: " + bad.message);
     check(mm.list().size() == 1, "failed download does not change db");
 
+    // Steam reporting the item as not found (private/removed) is refused before
+    // steamcmd runs, because steamcmd would only print "Access Denied" and
+    // still exit 0.
+    const std::string downloads_before_missing = read_file(steam_log);
+    setenv("FAKE_CURL_JSON",
+           R"({"response":{"result":1,"resultcount":1,"publishedfiledetails":[{"publishedfileid":"999","result":9}]}})",
+           1);
+    log.clear();
+    auto missing = mm.add("999", logfn);
+    check(!missing.ok && missing.message.find("unavailable") != std::string::npos,
+          "unavailable item reported before download: " + missing.message);
+    check(read_file(steam_log) == downloads_before_missing,
+          "unavailable item does not reach steamcmd");
+    check(mm.list().size() == 1, "unavailable item does not change db");
+    set_json_time(1700000900);
+
     // A first install whose mod.info targets another major game build is refused.
     setenv("FAKE_STEAMCMD_VERSION_MIN", "43.0", 1);
     log.clear();
@@ -383,9 +805,8 @@ exit "${FAKE_CURL_EXIT:-0}"
           "incompatible first install rejected: " + incompatible.message);
     check(!pz::fs::exists(cfg.user_mods_dir / "FixtureMod777"),
           "incompatible first install leaves no mod folder");
-    check(!pz::fs::exists(cfg.data_dir / "steam_cache" / "steamapps" / "workshop" /
-                          "content" / "108600" / "777"),
-          "incompatible download cache removed");
+    check(!pz::fs::exists(cfg.data_dir / "steam_cache" / "777"),
+          "incompatible per-download cache removed");
     unsetenv("FAKE_STEAMCMD_VERSION_MIN");
 
     // remove command deletes only the recorded folder.
@@ -405,7 +826,18 @@ exit "${FAKE_CURL_EXIT:-0}"
     auto pasted_id = pz::run_command(mm, "444", logfn);
     check(pasted_id.ok, "bare workshop id acts as add: " + pasted_id.message);
     check(pz::fs::exists(cfg.user_mods_dir / "FixtureMod444" / "mod.info"), "bare id installed");
-    check(mm.remove(333, logfn).ok && mm.remove(444, logfn).ok, "bare-add mods removed");
+    auto batch = pz::run_command(mm, "add 445 446", logfn);
+    check(batch.ok, "batch add succeeds: " + batch.message);
+    check(batch.message.find("Installed 2 of 2") != std::string::npos,
+          "batch add reports every installed item");
+    check(pz::fs::exists(cfg.user_mods_dir / "FixtureMod445" / "mod.info") &&
+              pz::fs::exists(cfg.user_mods_dir / "FixtureMod446" / "mod.info"),
+          "both items in a batch installed");
+    check(std::find(log.begin(), log.end(), "446: Installed 1 mod(s)") != log.end(),
+          "batch add logs each item");
+    check(mm.remove(333, logfn).ok && mm.remove(444, logfn).ok &&
+              mm.remove(445, logfn).ok && mm.remove(446, logfn).ok,
+          "bare-add and batch mods removed");
 
     // A collection expands into its children; already-installed children skip.
     setenv("FAKE_CURL_COLLECTION_JSON",
@@ -439,8 +871,123 @@ exit "${FAKE_CURL_EXIT:-0}"
     auto multi_remove = pz::run_command(mm, "remove 111 222", logfn);
     check(multi_remove.ok, "multi remove succeeds: " + multi_remove.message);
     check(mm.list().empty(), "multi remove cleared the db");
-    unsetenv("FAKE_STEAMCMD_PER_ITEM");
     unsetenv("FAKE_CURL_COLLECTION_JSON");
+
+    // One Workshop item can ship several mod folders (an old and a new
+    // variant). Every folder is installed, the UI groups them into one row,
+    // and a variant the item later drops is removed on update.
+    setenv("FAKE_STEAMCMD_PER_ITEM", "1", 1);
+    setenv("FAKE_STEAMCMD_EXTRA_MOD", "VariantB", 1);
+    set_json_time(1700001100);
+    log.clear();
+    auto variants = mm.add("1010", logfn);
+    check(variants.ok, "multi-folder install succeeds: " + variants.message);
+    check(pz::fs::exists(cfg.user_mods_dir / "FixtureMod1010" / "mod.info") &&
+              pz::fs::exists(cfg.user_mods_dir / "VariantB" / "mod.info"),
+          "both variants from one Workshop item installed");
+    auto grouped = pz::visible_mods(mm.list(), "", false, 0,
+        [](std::uint64_t) { return false; });
+    check(grouped.size() == 1 && grouped[0].folders.size() == 2,
+          "multi-folder item appears as one UI row");
+
+    // Manual folders are visible and can be enabled by folder name. Enabling a
+    // multi-folder item writes only its preferred variant.
+    bool saw_manual = false;
+    for (const auto& m : mm.list_all())
+        if (m.workshop_id == 0 && m.folder == "not-ours") saw_manual = true;
+    check(saw_manual, "untracked manual folder appears in the full list");
+    log.clear();
+    auto manual_enable = mm.set_selection_enabled(
+        pz::ActivationKind::Default, {}, {}, {"not-ours"}, true, logfn);
+    check(manual_enable.ok, "manual folder can be enabled: " + manual_enable.message);
+    check(read_file(cfg.user_mods_dir / "default.txt").find("mod = notours,") !=
+              std::string::npos,
+          "manual folder Mod ID written to default.txt");
+
+    const std::string preferred = mm.preferred_mod_id_for(1010);
+    check(!preferred.empty(), "multi-folder item has a preferred variant");
+    auto variant_enable = mm.set_mods_enabled(
+        pz::ActivationKind::Default, {}, {1010}, true, logfn);
+    check(variant_enable.ok, "variant enable succeeds: " + variant_enable.message);
+    const std::string default_text = read_file(cfg.user_mods_dir / "default.txt");
+    check(default_text.find("mod = " + preferred + ",") != std::string::npos,
+          "preferred variant is enabled");
+    for (const auto& id : mm.mod_ids_for(1010)) {
+        if (id == preferred) continue;
+        check(default_text.find("mod = " + id + ",") == std::string::npos,
+              "sibling variant is not enabled");
+    }
+
+    unsetenv("FAKE_STEAMCMD_EXTRA_MOD");
+    set_json_time(1700001200);
+    log.clear();
+    auto variant_update = mm.update_one(1010, logfn);
+    check(variant_update.ok, "multi-folder update succeeds: " + variant_update.message);
+    check(!pz::fs::exists(cfg.user_mods_dir / "VariantB"),
+          "variant no longer shipped is removed");
+    check(pz::fs::exists(cfg.user_mods_dir / "FixtureMod1010" / "mod.info"),
+          "remaining variant kept");
+    check(mm.remove(1010, logfn).ok, "multi-folder fixture removed");
+    unsetenv("FAKE_STEAMCMD_PER_ITEM");
+
+    // A stale per-item cache from an interrupted download must not poison the
+    // next install. A fresh downloader root is created for every item.
+    const auto stale_cache = cfg.data_dir / "steam_cache" / "999";
+    write_file(stale_cache / "poison-cache", "stale\n");
+    setenv("FAKE_STEAMCMD_PER_ITEM", "1", 1);
+    set_json_time(1700001000);
+    log.clear();
+    auto stale_install = mm.add("999", logfn);
+    check(stale_install.ok, "install ignores stale per-item cache: " + stale_install.message);
+    check(!pz::fs::exists(stale_cache), "stale per-item cache cleared");
+    check(mm.remove(999, logfn).ok, "stale-cache fixture removed");
+    unsetenv("FAKE_STEAMCMD_PER_ITEM");
+
+    // Activation targets: server Mods= and WorkshopItems= are written together.
+    setenv("FAKE_STEAMCMD_PER_ITEM", "1", 1);
+    set_json_time(1700001050);
+    log.clear();
+    auto activation_install = mm.add("999", logfn);
+    check(activation_install.ok, "activation fixture installed: " + activation_install.message);
+    write_file(cfg.zomboid_dir / "Server" / "local.ini", "Mods=\nWorkshopItems=\n");
+    log.clear();
+    auto enable_server = mm.set_mods_enabled(pz::ActivationKind::Server, "local", {999},
+                                             true, logfn);
+    check(enable_server.ok, "server enable succeeds: " + enable_server.message);
+    const std::string server_ini = read_file(cfg.zomboid_dir / "Server" / "local.ini");
+    check(server_ini.find("Mods=\\FixtureMod999") != std::string::npos,
+          "server Mods= enabled with B42 backslash");
+    check(server_ini.find("WorkshopItems=999") != std::string::npos,
+          "server WorkshopItems= filled for downloads");
+    auto server_targets = mm.activation_targets();
+    auto local_server = std::find_if(server_targets.begin(), server_targets.end(),
+        [](const pz::ActivationTarget& t) {
+            return t.kind == pz::ActivationKind::Server && t.name == "local";
+        });
+    check(local_server != server_targets.end() &&
+              mm.workshop_ids_for(*local_server) == (std::vector<std::uint64_t>{999}),
+          "server target shares its Workshop IDs");
+    auto disable_server = mm.set_mods_enabled(pz::ActivationKind::Server, "local", {999},
+                                              false, logfn);
+    check(disable_server.ok &&
+              read_file(cfg.zomboid_dir / "Server" / "local.ini").find("FixtureMod999") ==
+                  std::string::npos,
+          "server disable removes the Mod ID");
+
+    // Opt-in auto-enable adds a new install to mods/default.txt.
+    mm.config().auto_enable = true;
+    setenv("FAKE_STEAMCMD_PER_ITEM", "1", 1);
+    set_json_time(1700001300);
+    log.clear();
+    auto auto_enabled = mm.add("2020", logfn);
+    check(auto_enabled.ok, "auto-enable install succeeds: " + auto_enabled.message);
+    check(read_file(cfg.user_mods_dir / "default.txt").find("mod = FixtureMod2020,") !=
+              std::string::npos,
+          "auto-enable writes the plain Mod ID to default.txt");
+    check(mm.remove(2020, logfn).ok, "auto-enable fixture removed");
+    check(mm.remove(999, logfn).ok, "activation fixture removed");
+    mm.config().auto_enable = false;
+    unsetenv("FAKE_STEAMCMD_PER_ITEM");
 
     // The GUI settings dialog saves through the config command.
     auto cfg_cmd = pz::run_command(mm, "config steam_user ui-user", logfn);
@@ -459,9 +1006,16 @@ int main() {
     test_parse_workshop_id();
     test_steamcmd_detection(root);
     test_builtin_steamcmd(root);
+    test_config_paths(root);
+    test_atomic_write(root);
+    test_external_reload(root);
     test_read_mod_info(root);
+    test_missing_requirements(root);
     test_discover_mod_roots(root);
     test_time_updated_parser();
+    test_activation_formats(root);
+    test_ui_helpers();
+    test_published_result_parser();
     test_collection_parser();
     test_install_flow(root);
 

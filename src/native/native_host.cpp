@@ -118,13 +118,21 @@ int main() {
     pz::ModManager mm(cfg);
 
     std::vector<std::string> log;
+    auto logfn = [&log](const std::string& line) {
+        log.push_back(line.size() > 500 ? line.substr(0, 500) : line);
+    };
     pz::Result result;
     if (url.empty()) {
         result = {false, "Missing Workshop URL or ID."};
     } else {
-        result = pz::run_command(mm, "add " + url, [&log](const std::string& line) {
-            log.push_back(line.size() > 500 ? line.substr(0, 500) : line);
-        });
+        result = pz::run_command(mm, "add " + url, logfn);
+        // The browser menu is a single "Add or update" action. An item that is
+        // already installed is updated instead of ending in a dead end; an
+        // unchanged item reports "Up to date" without downloading.
+        if (!result.ok && result.message.rfind("Already installed", 0) == 0) {
+            log.clear();
+            result = pz::run_command(mm, "update " + url, logfn);
+        }
     }
 
     if (log.size() > 40) log.erase(log.begin(), log.end() - 40);

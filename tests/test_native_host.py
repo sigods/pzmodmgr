@@ -68,6 +68,14 @@ exit 0
     if not os.path.exists(os.path.join(home, "Zomboid", "mods", "FixtureMod", "mod.info")):
         raise SystemExit("mod.info was not installed into the real mods layout")
 
+    # The browser menu is a single add-or-update action: a second run on an
+    # installed item must update/check it instead of failing as a duplicate.
+    response, proc = run_host({"url": "123456789"}, env)
+    if not response.get("ok"):
+        raise SystemExit("installed item was not updated: %r stderr=%r" % (response, proc.stderr))
+    if "Up to date" not in str(response.get("message", "")):
+        raise SystemExit("installed item did not report up to date: %r" % (response,))
+
     response, proc = run_host({"url": "not-a-url"}, env)
     if response.get("ok"):
         raise SystemExit("invalid URL unexpectedly succeeded")

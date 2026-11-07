@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.hpp"
 #include <optional>
+#include <string>
 #include <vector>
 namespace pz {
 struct ModInfo {
@@ -10,14 +11,15 @@ struct ModInfo {
     std::string mod_version;   // modversion= from mod.info
     std::string version_min;   // minimum supported Project Zomboid build
     std::string version_max;   // maximum supported build, empty = open ended
+    std::vector<std::string> required_ids; // require= entries, in mod.info order
     fs::path icon;             // resolved icon PNG referenced by the newest mod.info
 };
 std::optional<ModInfo> read_mod_info(const fs::path& dir);
 std::optional<ModInfo> read_mod_info(const fs::path& dir, const std::string& game_version);
 
-// Compares dotted numeric versions such as 42.19.0 and 42.21. Returns a
-// negative/zero/positive value like strcmp. Missing components count as zero.
-int compare_versions(const std::string& a, const std::string& b);
+// Formats versionMin/versionMax as "PZ 41.78-42.1", "PZ 41.78+", or
+// "PZ up to 42.1". Returns empty when neither bound is set.
+std::string version_range(const ModInfo& info);
 
 // True when the mod's versionMin/versionMax range includes the game build.
 // An empty game version or empty bounds means the mod is accepted.

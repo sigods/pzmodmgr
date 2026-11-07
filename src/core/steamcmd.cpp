@@ -5,8 +5,18 @@
 #include <cctype>
 #include <charconv>
 #include <cstdio>
+#include <functional>
 #include <string_view>
 #include <system_error>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace pz {
 namespace {
@@ -24,49 +34,111 @@ std::string quote(const std::string& s) {
 #endif
 }
 
-// Runs a shell command, streams each line to log, returns exit status.
-int run_capture(const std::string& cmd, const LogFn& log, std::string& tail) {
 #ifdef _WIN32
-    FILE* p = _popen(cmd.c_str(), "r");
-#else
-    FILE* p = popen(cmd.c_str(), "r");
+std::wstring widen(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                      nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(static_cast<std::size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
 #endif
-    if (!p) return -1;
+
+// Runs `cmd` through the shell, handing every chunk of combined output to sink.
+// Returns the child's exit status, or -1 when it could not be started.
+//
+// On Windows this is CreateProcessW with CREATE_NO_WINDOW instead of _popen():
+// pzmodmgr is a GUI-subsystem program, so it owns no console, and Windows would
+// allocate one for every curl.exe and steamcmd.exe child. That showed up as a
+// blank console window flashing on each Install/Check (one per child). The
+// handles are still pipes, so the output is captured exactly as before.
+int spawn_capture(const std::string& cmd,
+                  const std::function<void(const char*, std::size_t)>& sink) {
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE rd = nullptr;
+    HANDLE wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return -1;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, 0, nullptr);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+
+    // Same shape as the CRT's _popen(): cmd.exe /c <command>. The callers add
+    // the outer quotes and the 2>&1 / <nul redirections themselves.
+    std::wstring line = L"cmd.exe /c " + widen(cmd);
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE,
+                                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(wr);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!started) {
+        CloseHandle(rd);
+        return -1;
+    }
 
     std::array<char, 4096> buf{};
-    while (std::fgets(buf.data(), static_cast<int>(buf.size()), p)) {
-        std::string line = buf.data();
-        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
-        if (!line.empty()) {
-            log(line);
-            tail += line + "\n";
-        }
-    }
-#ifdef _WIN32
-    return _pclose(p);
-#else
-    return pclose(p);
-#endif
-}
+    DWORD got = 0;
+    while (ReadFile(rd, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr) && got > 0)
+        sink(buf.data(), got);
+    CloseHandle(rd);
 
-// Runs a shell command and captures stdout/stderr verbatim (no line splitting).
-int run_capture_raw(const std::string& cmd, std::string& out) {
-#ifdef _WIN32
-    FILE* p = _popen(cmd.c_str(), "r");
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return static_cast<int>(code);
 #else
     FILE* p = popen(cmd.c_str(), "r");
-#endif
     if (!p) return -1;
 
     std::array<char, 4096> buf{};
     std::size_t n = 0;
-    while ((n = std::fread(buf.data(), 1, buf.size(), p)) > 0)
-        out.append(buf.data(), n);
-#ifdef _WIN32
-    return _pclose(p);
-#else
+    while ((n = std::fread(buf.data(), 1, buf.size(), p)) > 0) sink(buf.data(), n);
     return pclose(p);
 #endif
+}
+
+// Runs a shell command and appends its combined output to out. When log is not
+// null every complete line is also reported to it as it arrives, so long
+// steamcmd runs keep streaming into the UI.
+int run_capture(const std::string& cmd, const LogFn* log, std::string& out) {
+    std::string pending;
+    const int rc = spawn_capture(cmd, [&](const char* data, std::size_t n) {
+        out.append(data, n);
+        if (!log) return;
+        pending.append(data, n);
+        std::size_t pos = 0;
+        while ((pos = pending.find('\n')) != std::string::npos) {
+            std::string line = pending.substr(0, pos);
+            pending.erase(0, pos + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) (*log)(line);
+        }
+    });
+    if (log && !pending.empty()) {
+        if (pending.back() == '\r') pending.pop_back();
+        if (!pending.empty()) (*log)(pending);
+    }
+    return rc;
+}
+
+// Runs a shell command and captures the output verbatim (no line splitting).
+int run_capture_raw(const std::string& cmd, std::string& out) {
+    return run_capture(cmd, nullptr, out);
 }
 
 std::string one_line(std::string s) {
@@ -185,7 +257,7 @@ DownloadOutcome steamcmd_download_workshop_item(Config& cfg,
 #endif
 
     std::string tail;
-    int rc = run_capture(cmd, log, tail);
+    int rc = run_capture(cmd, &log, tail);
 
     out.content_dir = install_dir / "steamapps" / "workshop" / "content"
                     / std::to_string(kProjectZomboidAppId) / std::to_string(item_id);
@@ -194,56 +266,122 @@ DownloadOutcome steamcmd_download_workshop_item(Config& cfg,
     bool has_content = fs::is_directory(out.content_dir, ec) && !fs::is_empty(out.content_dir, ec);
     out.ok = (rc == 0) && has_content;
     if (!out.ok) {
-        out.detail = "steamcmd failed (rc=" + std::to_string(rc) +
-                     "). Check: logged in once manually? Steam Guard? account owns PZ?";
+        // steamcmd exits 0 even when Steam refuses the item, so the exit code
+        // alone says nothing. Access Denied means Steam cannot see the item at
+        // all (private, removed, or not a public Workshop item), which no login
+        // or Steam Guard fix can solve.
+        if (tail.find("Access Denied") != std::string::npos) {
+            out.detail = "Steam refused item " + std::to_string(item_id) +
+                         " (Access Denied): it is private or removed, so it cannot be downloaded";
+        } else if (rc == 0) {
+            out.detail = "steamcmd finished without downloading item " +
+                         std::to_string(item_id) + " (item unavailable?)";
+        } else {
+            out.detail = "steamcmd failed (rc=" + std::to_string(rc) +
+                         "). Check: logged in once manually? Steam Guard? account owns PZ?";
+        }
     }
     return out;
 }
 
-std::uint64_t parse_published_file_time_updated(const std::string& json) {
-    // Walk the JSON, skipping string bodies, so a title/description that
-    // embeds `"time_updated":...` cannot spoof the real field.
-    std::size_t i = 0;
+namespace {
+
+// Walks JSON while skipping string bodies and returns the position just after
+// the closing quote of the first `key`. npos when the key is absent.
+std::size_t find_key(const std::string& json, std::string_view key,
+                     std::size_t from = 0) {
+    std::size_t i = from;
     while (i < json.size()) {
         if (json[i] != '"') { ++i; continue; }
-
-        const std::size_t key_start = ++i;
+        const std::size_t start = ++i;
         while (i < json.size() && json[i] != '"') {
             if (json[i] == '\\' && i + 1 < json.size()) ++i;
             ++i;
         }
-        std::string_view key(json.data() + key_start, i - key_start);
-        if (i < json.size()) ++i;   // closing quote
-        if (key != "time_updated") continue;
-
-        // A plain string value can also equal "time_updated"; only a
-        // following ':' makes it the field we want.
-        while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
-        if (i >= json.size() || json[i] != ':') continue;
-        ++i;
-        while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
-
-        auto first = json.data() + i;
-        auto last = first;
-        while (last != json.data() + json.size() &&
-               std::isdigit(static_cast<unsigned char>(*last))) ++last;
-        if (first == last) return 0;
-
-        std::uint64_t value = 0;
-        auto r = std::from_chars(first, last, value);
-        return r.ec == std::errc{} ? value : 0;
+        if (i >= json.size()) return std::string::npos;
+        const std::string_view found(json.data() + start, i - start);
+        ++i;   // closing quote
+        if (found == key) return i;
     }
-    return 0;
+    return std::string::npos;
+}
+
+// Reads the unsigned number that follows the key found at pos (": 123").
+bool read_uint_after(const std::string& json, std::size_t pos, std::uint64_t& value) {
+    std::size_t i = pos;
+    while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+    if (i >= json.size() || json[i] != ':') return false;
+    ++i;
+    while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+
+    const char* first = json.data() + i;
+    const char* last = first;
+    while (last != json.data() + json.size() &&
+           std::isdigit(static_cast<unsigned char>(*last))) ++last;
+    if (first == last) return false;
+
+    std::uint64_t parsed = 0;
+    const auto r = std::from_chars(first, last, parsed);
+    if (r.ec != std::errc{}) return false;
+    value = parsed;
+    return true;
+}
+
+}  // namespace
+
+std::uint64_t parse_published_file_time_updated(const std::string& json) {
+    std::size_t from = 0;
+    for (;;) {
+        const std::size_t pos = find_key(json, "time_updated", from);
+        if (pos == std::string::npos) return 0;
+        std::uint64_t value = 0;
+        if (read_uint_after(json, pos, value)) return value;
+        from = pos;   // A string value can itself equal "time_updated".
+    }
+}
+
+std::uint32_t parse_published_file_result(const std::string& json) {
+    // GetPublishedFileDetails answers with an outer "result" (the call status,
+    // normally 1) and a per-item "result" inside publishedfiledetails. Only the
+    // item's own result says whether the item is reachable.
+    const std::size_t items = find_key(json, "publishedfiledetails");
+    if (items == std::string::npos) return 0;
+    const std::size_t pos = find_key(json, "result", items);
+    if (pos == std::string::npos) return 0;
+
+    std::uint64_t value = 0;
+    if (!read_uint_after(json, pos, value)) return 0;
+    return static_cast<std::uint32_t>(value);
+}
+
+namespace {
+
+constexpr const char* kPublishedFileDetailsUrl =
+    "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
+
+std::string published_file_details_body(std::uint64_t item_id) {
+    return "itemcount=1&publishedfileids[0]=" + std::to_string(item_id);
+}
+
+bool fetch_published_file_details(std::uint64_t item_id, std::string& response) {
+    return steam_api_post(kPublishedFileDetailsUrl,
+                          published_file_details_body(item_id), response);
+}
+
+}  // namespace
+
+std::uint32_t fetch_published_file_result(std::uint64_t item_id) {
+    // 1 = OK, 9 = k_EResultFileNotFound (removed or private), 15 = access
+    // denied. 0 means the API could not be reached, which callers must not read
+    // as a verdict about the item.
+    std::string response;
+    if (!fetch_published_file_details(item_id, response)) return 0;
+    return parse_published_file_result(response);
 }
 
 std::uint64_t fetch_remote_time_updated(std::uint64_t item_id) {
-    const std::string url =
-        "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/";
-    const std::string body =
-        "itemcount=1&publishedfileids[0]=" + std::to_string(item_id);
-
     std::string response;
-    if (!steam_api_post(url, body, response)) return 0;
+    if (!fetch_published_file_details(item_id, response)) return 0;
     return parse_published_file_time_updated(response);
 }
 
