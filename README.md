@@ -19,7 +19,7 @@ every child item it contains.
 
 The GUI is a native utility on both platforms: an accent-orange install action,
 a card list with each mod's `icon=` PNG, folder, enabled `ON`/`OFF` state,
-Ctrl/Shift multi-select, double-click to update, and a compact activity log. The list can be
+Ctrl/Shift multi-select (a plain row click toggles that mod without replacing the rest), double-click to update, and a compact activity log. The list can be
 filtered by name or folder, restricted to mods with an available update, and
 sorted by name or last update. Settings also switches the UI
 between light and dark themes; the choice is stored in `config.ini`. `Check`

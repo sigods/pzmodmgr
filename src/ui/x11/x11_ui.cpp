@@ -893,30 +893,6 @@ int run_ui(ModManager& mm) {
         return index >= 0 && index < static_cast<int>(visible.size()) ? index : -1;
     };
 
-    auto check_hit = [&](int x, int y, int index) {
-        const int slot = index - list_offset;
-        if (slot < 0 || slot >= kRows) return false;
-        const int cx = kMargin + kCardW - 30;
-        const int cy = kListTop + slot * (kRowH + kRowGap) + kRowH / 2;
-        const int dx = x - cx;
-        const int dy = y - cy;
-        return dx * dx + dy * dy <= 100;   // the check circle has a 10px radius
-    };
-
-    auto draw_rounded_check = [&](int cx, int cy, bool selected) {
-        if (selected) {
-            XSetForeground(dpy, gc, pal.accent);
-            XFillArc(dpy, win, gc, cx - 10, cy - 10, 20, 20, 0, 360 * 64);
-            XSetForeground(dpy, gc, pal.on_accent);
-            XSetLineAttributes(dpy, gc, 2, LineSolid, CapRound, JoinRound);
-            XDrawLine(dpy, win, gc, cx - 4, cy, cx - 1, cy + 3);
-            XDrawLine(dpy, win, gc, cx - 1, cy + 3, cx + 5, cy - 4);
-            XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
-        } else {
-            XSetForeground(dpy, gc, pal.border_strong);
-            XDrawArc(dpy, win, gc, cx - 10, cy - 10, 20, 20, 0, 360 * 64);
-        }
-    };
 
     auto draw_settings = [&]() {
         fill(dpy, win, gc, 0, 0, kW, kH, pal.bg);
@@ -1178,7 +1154,6 @@ int run_ui(ModManager& mm) {
                          pill.x + (pill.w - text_width(body, "UPDATE")) / 2,
                          pill.y + 14, "UPDATE", pal.on_accent);
                 }
-                draw_rounded_check(card.x + card.w - 30, card.y + card.h / 2, selected);
             }
 
             int thumb_y = 0, thumb_h = 0;
@@ -1904,17 +1879,6 @@ int run_ui(ModManager& mm) {
                 if (index >= 0) {
                     const auto& row = visible[static_cast<std::size_t>(index)];
                     const auto id = row.workshop_id;
-                    if (check_hit(x, y, index)) {
-                        // The circle is a checkbox: toggle just this row without
-                        // clearing the rest of the selection or requiring Ctrl.
-                        if (row_selected(row)) unselect_row(row);
-                        else select_row(row);
-                        anchor_index = index;
-                        last_click_index = -1;
-                        confirm_remove = false;
-                        redraw();
-                        break;
-                    }
                     const auto now = std::chrono::steady_clock::now();
                     const bool double_click =
                         last_click_index == index &&
@@ -1944,8 +1908,10 @@ int run_ui(ModManager& mm) {
                         else select_row(row);
                         anchor_index = index;
                     } else {
-                        clear_all();
-                        select_row(row);
+                        // A plain row click toggles that row without replacing
+                        // the rest of the selection.
+                        if (row_selected(row)) unselect_row(row);
+                        else select_row(row);
                         anchor_index = index;
                     }
                     last_click_index = index;

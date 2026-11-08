@@ -988,20 +988,19 @@ LRESULT CALLBACK ListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (HIWORD(hit) == 0 && item >= 0 && item < static_cast<int>(g_row_ids.size())) {
             RECT item_rc{};
             if (SendMessageW(hwnd, LB_GETITEMRECT, item, (LPARAM)&item_rc) != LB_ERR) {
-                const int cx = item_rc.right - 30;
-                const int cy = item_rc.top + kRowH / 2;
-                const int dx = mx - cx;
-                const int dy = my - cy;
-                if (dx * dx + dy * dy <= 100) {   // the check circle has a 9px radius
-                    if (msg == WM_LBUTTONDOWN) {
-                        // Toggle only this row. Do not let the listbox replace
-                        // the whole selection as a normal click would.
-                        const LRESULT selected = SendMessageW(hwnd, LB_GETSEL, item, 0);
-                        SendMessageW(hwnd, LB_SETSEL, selected ? FALSE : TRUE, item);
-                        sync_selection();
-                        InvalidateRect(hwnd, &item_rc, FALSE);
-                    }
+                if (msg == WM_LBUTTONDOWN &&
+                    (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+                    (GetKeyState(VK_SHIFT) & 0x8000) == 0) {
+                    // A plain row click toggles that row without replacing the
+                    // rest of the selection. Ctrl/Shift keep their native
+                    // listbox behavior.
+                    const LRESULT selected = SendMessageW(hwnd, LB_GETSEL, item, 0);
+                    SendMessageW(hwnd, LB_SETSEL, selected ? FALSE : TRUE, item);
+                    SendMessageW(hwnd, LB_SETANCHORINDEX, item, 0);
+                    SendMessageW(hwnd, LB_SETCARETINDEX, item, FALSE);
                     SetFocus(hwnd);
+                    sync_selection();
+                    InvalidateRect(hwnd, &item_rc, FALSE);
                     return 0;
                 }
             }
@@ -1510,26 +1509,6 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
-    const int cx = card.right - 30, cy = card.top + kRowH / 2;
-    HBRUSH circle = CreateSolidBrush(selected ? g_theme.accent : g_theme.surface);
-    HPEN ring = CreatePen(PS_SOLID, 1, selected ? g_theme.accent : g_theme.brand_border);
-    HGDIOBJ old_brush = SelectObject(dis->hDC, circle);
-    HGDIOBJ old_pen = SelectObject(dis->hDC, ring);
-    Ellipse(dis->hDC, cx - 9, cy - 9, cx + 9, cy + 9);
-    SelectObject(dis->hDC, old_pen);
-    SelectObject(dis->hDC, old_brush);
-    DeleteObject(ring);
-    DeleteObject(circle);
-
-    if (selected) {
-        HPEN check = CreatePen(PS_SOLID, 2, g_theme.on_accent);
-        HGDIOBJ old = SelectObject(dis->hDC, check);
-        MoveToEx(dis->hDC, cx - 4, cy, nullptr);
-        LineTo(dis->hDC, cx - 1, cy + 3);
-        LineTo(dis->hDC, cx + 5, cy - 4);
-        SelectObject(dis->hDC, old);
-        DeleteObject(check);
-    }
     SelectObject(dis->hDC, old_font);
 }
 
