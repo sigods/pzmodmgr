@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(pzmodmgr VERSION 0.2.1 LANGUAGES CXX)
+project(pzmodmgr VERSION 0.2.2 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -26,9 +26,11 @@ add_library(pzcore STATIC
   src/core/steamcmd.cpp
   src/core/mod_info.cpp
   src/core/mod_manager.cpp
+  src/core/updater.cpp
   src/core/commands.cpp)
 target_include_directories(pzcore PUBLIC src)
 target_link_libraries(pzcore PUBLIC Threads::Threads)
+target_compile_definitions(pzcore PUBLIC PZMODMGR_VERSION="${PROJECT_VERSION}")
 
 add_executable(pzmodmgr src/main.cpp src/ui/mod_icon.cpp)
 target_include_directories(pzmodmgr PRIVATE third_party)

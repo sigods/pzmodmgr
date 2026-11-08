@@ -21,13 +21,13 @@
 #include <vector>
 
 #ifndef PZ_VERSION
-#define PZ_VERSION L"0.2.1"
+#define PZ_VERSION L"0.2.2"
 #endif
 
 namespace {
 
 constexpr wchar_t kAppName[] = L"PZ Mod Manager";
-constexpr wchar_t kVersion[] = L"0.2.1";
+constexpr wchar_t kVersion[] = L"0.2.2";
 constexpr wchar_t kUninstallKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PZModManager";
 constexpr wchar_t kFirefoxHostKey[] = L"Software\\Mozilla\\NativeMessagingHosts\\pzmodmgr";

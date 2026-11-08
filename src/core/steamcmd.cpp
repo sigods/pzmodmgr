@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <functional>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -16,6 +19,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <csignal>
+#include <fcntl.h>
+#include <spawn.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 namespace pz {
@@ -160,7 +169,229 @@ bool steam_api_post(const std::string& url, const std::string& body, std::string
 #endif
     return run_capture_raw(cmd, response) == 0;
 }
+
+bool ends_with(const std::string& value, const std::string& suffix) {
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+#ifdef _WIN32
+std::wstring quote_windows_arg(const std::wstring& arg) {
+    if (arg.empty()) return L"\"\"";
+    if (arg.find_first_of(L" \t\n\v\"") == std::wstring::npos) return arg;
+    std::wstring out = L"\"";
+    for (std::size_t i = 0; i < arg.size();) {
+        std::size_t slashes = 0;
+        while (i < arg.size() && arg[i] == L'\\') {
+            ++i;
+            ++slashes;
+        }
+        if (i == arg.size()) {
+            out.append(slashes * 2, L'\\');
+            break;
+        }
+        if (arg[i] == L'"') {
+            out.append(slashes * 2 + 1, L'\\');
+            out += L'"';
+        } else {
+            out.append(slashes, L'\\');
+            out += arg[i];
+        }
+        ++i;
+    }
+    out += L'"';
+    return out;
+}
+#endif
 }  // namespace
+
+bool http_get(const std::string& url, std::string& response, std::string& detail) {
+    response.clear();
+    detail.clear();
+    std::string cmd = "curl -sS --fail --location --connect-timeout 10 --max-time 30 "
+                      "-H \"Accept: application/vnd.github+json\" "
+                      "-H \"User-Agent: pzmodmgr\" " + quote(url) + " 2>&1";
+#ifdef _WIN32
+    cmd = "\"" + cmd + "\"";
+#endif
+    if (run_capture_raw(cmd, response) == 0) return true;
+    detail = one_line(response);
+    if (detail.empty()) detail = "could not reach the update server";
+    return false;
+}
+
+bool download_url(const std::string& url, const fs::path& dest, std::string& detail) {
+    detail.clear();
+    std::error_code ec;
+    if (!dest.parent_path().empty()) fs::create_directories(dest.parent_path(), ec);
+    if (ec) {
+        detail = ec.message();
+        return false;
+    }
+    fs::path temp = dest;
+    temp += ".part";
+    fs::remove(temp, ec);
+
+    std::string output;
+    std::string cmd = "curl -sS --fail --location --connect-timeout 10 --max-time 600 -o "
+                    + quote(temp.string()) + " " + quote(url) + " 2>&1";
+#ifdef _WIN32
+    cmd = "\"" + cmd + "\"";
+#endif
+    const int rc = run_capture_raw(cmd, output);
+    if (rc != 0) {
+        fs::remove(temp, ec);
+        detail = one_line(output);
+        if (detail.empty()) detail = "download failed";
+        return false;
+    }
+    const auto size = fs::file_size(temp, ec);
+    if (ec || size == 0) {
+        fs::remove(temp, ec);
+        detail = "downloaded file is empty";
+        return false;
+    }
+    fs::remove(dest, ec);
+    fs::rename(temp, dest, ec);
+    if (ec) {
+        fs::remove(temp, ec);
+        detail = ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool extract_archive(const fs::path& archive, const fs::path& dest,
+                     std::string& detail) {
+    detail.clear();
+    std::error_code ec;
+    fs::create_directories(dest, ec);
+    if (ec) {
+        detail = ec.message();
+        return false;
+    }
+    const std::string name = archive.filename().string();
+    std::string cmd;
+#ifdef _WIN32
+    if (ends_with(name, ".zip"))
+        cmd = "tar.exe -xf " + quote(archive.string()) + " -C " + quote(dest.string());
+    else if (ends_with(name, ".tar.gz") || ends_with(name, ".tgz"))
+        cmd = "tar.exe -xzf " + quote(archive.string()) + " -C " + quote(dest.string());
+    else {
+        detail = "unsupported update archive";
+        return false;
+    }
+    cmd = "\"" + cmd + "\"";
+#else
+    if (ends_with(name, ".zip"))
+        cmd = "unzip -q " + quote(archive.string()) + " -d " + quote(dest.string());
+    else if (ends_with(name, ".tar.gz") || ends_with(name, ".tgz"))
+        cmd = "tar -xzf " + quote(archive.string()) + " -C " + quote(dest.string());
+    else {
+        detail = "unsupported update archive";
+        return false;
+    }
+#endif
+    std::string output;
+    cmd += " 2>&1";
+    if (run_capture_raw(cmd, output) == 0) return true;
+    detail = one_line(output);
+    if (detail.empty()) detail = "could not extract the update archive";
+    return false;
+}
+
+bool start_detached_process(const fs::path& exe,
+                            const std::vector<std::string>& args,
+                            unsigned long* pid) {
+    if (pid) *pid = 0;
+#ifdef _WIN32
+    std::wstring command = quote_windows_arg(widen(exe.string()));
+    for (const auto& arg : args)
+        command += L" " + quote_windows_arg(widen(arg));
+    const std::wstring directory = exe.parent_path().wstring();
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> mutable_command(command.begin(), command.end());
+    mutable_command.push_back(L'\0');
+    const BOOL started = CreateProcessW(
+        exe.wstring().c_str(), mutable_command.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW, nullptr, directory.empty() ? nullptr : directory.c_str(),
+        &si, &pi);
+    if (!started) return false;
+    if (pid) *pid = static_cast<unsigned long>(pi.dwProcessId);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+#else
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    posix_spawnattr_init(&attributes);
+    for (int fd = 0; fd <= 2; ++fd)
+        posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", O_RDWR, 0);
+#ifdef POSIX_SPAWN_SETSID
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID);
+#endif
+    std::vector<std::string> storage;
+    storage.reserve(args.size() + 1);
+    storage.push_back(exe.string());
+    storage.insert(storage.end(), args.begin(), args.end());
+    std::vector<char*> argv;
+    argv.reserve(storage.size() + 1);
+    for (auto& value : storage) argv.push_back(value.data());
+    argv.push_back(nullptr);
+    pid_t child = 0;
+    const int rc = posix_spawn(&child, exe.c_str(), &actions, &attributes,
+                               argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attributes);
+    if (rc != 0) return false;
+    if (pid) *pid = static_cast<unsigned long>(child);
+    return true;
+#endif
+}
+
+bool wait_for_process(unsigned long pid) {
+    if (pid == 0) return true;
+#ifdef _WIN32
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!process) return GetLastError() == ERROR_INVALID_PARAMETER;
+    WaitForSingleObject(process, INFINITE);
+    CloseHandle(process);
+    return true;
+#else
+    for (;;) {
+        if (kill(static_cast<pid_t>(pid), 0) != 0) {
+            if (errno == ESRCH) return true;
+            if (errno != EPERM) return true;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+#endif
+}
+
+bool process_is_running(unsigned long pid) {
+    if (pid == 0) return false;
+#ifdef _WIN32
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (!process) return false;
+    const DWORD result = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return result == WAIT_TIMEOUT;
+#else
+    if (kill(static_cast<pid_t>(pid), 0) == 0) return true;
+    return errno == EPERM;
+#endif
+}
+
+unsigned long current_process_id() {
+#ifdef _WIN32
+    return static_cast<unsigned long>(GetCurrentProcessId());
+#else
+    return static_cast<unsigned long>(getpid());
+#endif
+}
 
 fs::path ensure_steamcmd(Config& cfg, const LogFn& log) {
     std::error_code ec;

@@ -37,6 +37,27 @@ std::string stamp() {
     return std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
 }
 
+// Download caches are only needed while an install is running. A crash or a
+// killed steamcmd can leave one behind forever; prune it after a day. Backups
+// are crash-recovery copies, so keep them for a week before reclaiming them.
+void prune_stale_children(const fs::path& dir, std::chrono::hours max_age) {
+    std::error_code ec;
+    fs::directory_iterator entries(dir, ec);
+    if (ec) return;
+    const auto cutoff = fs::file_time_type::clock::now() - max_age;
+    for (const auto& entry : entries) {
+        std::error_code item_ec;
+        const auto modified = fs::last_write_time(entry.path(), item_ec);
+        if (!item_ec && modified < cutoff) fs::remove_all(entry.path(), item_ec);
+    }
+    fs::remove(dir, ec);   // succeeds only when the directory is empty
+}
+
+void prune_stale_state(const fs::path& data_dir) {
+    prune_stale_children(data_dir / "steam_cache", std::chrono::hours(24));
+    prune_stale_children(data_dir / "backups", std::chrono::hours(24 * 7));
+}
+
 std::string read_game_version(const fs::path& zomboid_dir) {
     std::string version;
     for_each_line(zomboid_dir / "version.txt", [&](const std::string& line) {
@@ -167,6 +188,7 @@ ModManager::ModManager(Config cfg)
     : cfg_(std::move(cfg)), game_version_(read_game_version(cfg_.zomboid_dir)) {
     fs::create_directories(cfg_.user_mods_dir);
     fs::create_directories(cfg_.data_dir);
+    prune_stale_state(cfg_.data_dir);
     load_db();
 }
 
@@ -189,6 +211,7 @@ Result ModManager::set_zomboid_dir(const fs::path& dir) {
     fs::create_directories(new_data, ec);
     if (ec)
         return {false, "Could not create " + new_data.string() + ": " + ec.message()};
+    prune_stale_state(new_data);
 
     const fs::path old_builtin = builtin_steamcmd_path(cfg_);
     cfg_.zomboid_dir = normalized;
@@ -793,7 +816,7 @@ Result ModManager::set_mods_enabled(ActivationKind kind, const std::string& name
 Result ModManager::set_selection_enabled(ActivationKind kind, const std::string& name,
                                          const std::vector<std::uint64_t>& workshop_ids,
                                          const std::vector<std::string>& folders,
-                                         bool enabled, const LogFn&) {
+                                         bool enabled, const LogFn& log) {
     auto targets = activation_targets();
     auto target = std::find_if(targets.begin(), targets.end(),
         [&](const ActivationTarget& t) {
@@ -827,6 +850,56 @@ Result ModManager::set_selection_enabled(ActivationKind kind, const std::string&
     }
 
     if (enabled) {
+        // Enabling a mod must also enable the requirements it declares. Walk
+        // installed mod.info files transitively; requirements that are missing
+        // stay warnings (the dependency notice already reports them) and never
+        // make the enable fail.
+        struct InstalledInfo {
+            std::string id;
+            std::vector<std::string> requires;
+        };
+        std::vector<InstalledInfo> installed;
+        for (const auto& mod : list_all()) {
+            auto info = read_mod_info(cfg_.user_mods_dir / mod.folder, game_version_);
+            if (info && !info->id.empty())
+                installed.push_back({info->id, info->required_ids});
+        }
+        auto find_installed = [&](const std::string& id) -> const InstalledInfo* {
+            const std::string key = folded(id);
+            for (const auto& entry : installed)
+                if (folded(entry.id) == key) return &entry;
+            return nullptr;
+        };
+
+        std::vector<std::string> queue = add_ids;
+        std::set<std::string> visited;
+        for (const auto& id : queue) visited.insert(folded(id));
+        std::set<std::string> warned;
+        for (std::size_t i = 0; i < queue.size(); ++i) {
+            const std::string owner = queue[i];
+            const InstalledInfo* entry = find_installed(owner);
+            if (!entry) continue;
+            for (const auto& required : entry->requires) {
+                if (required.empty()) continue;
+                const std::string key = folded(required);
+                const InstalledInfo* requirement = find_installed(required);
+                if (!requirement) {
+                    if (warned.insert(key).second)
+                        log("required mod is not installed: " + required +
+                            " (needed by " + owner + ")");
+                    continue;
+                }
+                if (!visited.insert(key).second) continue;
+                if (std::find(add_ids.begin(), add_ids.end(), requirement->id) ==
+                    add_ids.end()) {
+                    add_ids.push_back(requirement->id);
+                    log("auto-enabled required mod " + requirement->id +
+                        " (needed by " + owner + ")");
+                }
+                queue.push_back(requirement->id);
+            }
+        }
+
         remove_ids.erase(std::remove_if(remove_ids.begin(), remove_ids.end(),
             [&](const std::string& id) {
                 return std::find(add_ids.begin(), add_ids.end(), id) != add_ids.end();
@@ -841,17 +914,36 @@ Result ModManager::set_selection_enabled(ActivationKind kind, const std::string&
         return {false, "Could not disable: no Mod ID was found for the selection"};
     }
 
-    if (!remove_ids.empty() &&
-        !write_activation_target(*target, remove_ids, {}, false))
-        return {false, "Could not write " + target->path.string()};
-
     const auto& write_ids = enabled ? add_ids : remove_ids;
-    if (!write_activation_target(*target, write_ids, workshops, enabled))
+    auto write_to = [&](ActivationTarget& destination) {
+        if (!remove_ids.empty() &&
+            !write_activation_target(destination, remove_ids, {}, false))
+            return false;
+        return write_activation_target(destination, write_ids, workshops, enabled);
+    };
+
+    std::string where = target->label;
+    if (enabled && target->kind == ActivationKind::Save) {
+        // A save's mod list is additive to the main list. Writing Default too
+        // means the mod is available outside that one save as well.
+        auto defaults = std::find_if(targets.begin(), targets.end(),
+            [](const ActivationTarget& t) {
+                return t.kind == ActivationKind::Default;
+            });
+        if (defaults == targets.end())
+            return {false, "Could not find mods/default.txt"};
+        if (!write_to(*defaults))
+            return {false, "Could not write " + defaults->path.string()};
+        where += " + Default";
+        log("enabled in Default because save targets also use mods/default.txt");
+    }
+
+    if (!write_to(*target))
         return {false, "Could not write " + target->path.string()};
 
     return {true, std::string(enabled ? "Enabled " : "Disabled ") +
                       std::to_string(write_ids.size()) + " Mod ID(s) in " +
-                      target->label};
+                      where};
 }
 
 std::uint64_t ModManager::read_last_check() const {

@@ -8,6 +8,19 @@ struct DownloadOutcome {
     std::string detail;
 };
 
+// Shared curl/tar/process helpers for the self-updater. All process creation
+// stays in steamcmd.cpp.
+bool http_get(const std::string& url, std::string& response, std::string& detail);
+bool download_url(const std::string& url, const fs::path& dest, std::string& detail);
+bool extract_archive(const fs::path& archive, const fs::path& dest,
+                     std::string& detail);
+bool start_detached_process(const fs::path& exe,
+                            const std::vector<std::string>& args,
+                            unsigned long* pid = nullptr);
+bool wait_for_process(unsigned long pid);
+bool process_is_running(unsigned long pid);
+unsigned long current_process_id();
+
 // Returns a usable steamcmd. Uses the configured path, an existing built-in
 // copy, or downloads Valve's official build into <Zomboid>/pzmodmgr/steamcmd.
 // System installations are only a fallback when the download fails.

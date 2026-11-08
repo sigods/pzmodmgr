@@ -3,8 +3,8 @@
 IDI_SETUP ICON "setup.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,0,0
- PRODUCTVERSION 0,2,0,0
+ FILEVERSION 0,2,2,0
+ PRODUCTVERSION 0,2,2,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -17,12 +17,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "pzmodmgr contributors"
             VALUE "FileDescription", "PZ Mod Manager Uninstaller"
-            VALUE "FileVersion", "0.2.1"
+            VALUE "FileVersion", "0.2.2"
             VALUE "InternalName", "pzmodmgr-uninstall"
             VALUE "LegalCopyright", "Copyright (C) 2026 pzmodmgr contributors. GPL-3.0-only."
             VALUE "OriginalFilename", "uninstall.exe"
             VALUE "ProductName", "PZ Mod Manager"
-            VALUE "ProductVersion", "0.2.1"
+            VALUE "ProductVersion", "0.2.2"
         END
     END
     BLOCK "VarFileInfo"

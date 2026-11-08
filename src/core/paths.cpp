@@ -38,7 +38,7 @@ bool is_executable(const fs::path& p) {
 #endif
 }
 
-fs::path executable_dir() {
+fs::path executable_file() {
 #ifdef _WIN32
     std::vector<wchar_t> buffer(1024);
     for (;;) {
@@ -46,7 +46,7 @@ fs::path executable_dir() {
                                            static_cast<DWORD>(buffer.size()));
         if (n == 0) return {};
         if (n < buffer.size() - 1)
-            return fs::path(std::wstring(buffer.data(), n)).parent_path();
+            return fs::path(std::wstring(buffer.data(), n));
         buffer.resize(buffer.size() * 2);
     }
 #elif defined(__linux__)
@@ -55,13 +55,17 @@ fs::path executable_dir() {
         const ssize_t n = ::readlink("/proc/self/exe", buffer.data(), buffer.size());
         if (n < 0) return {};
         if (static_cast<std::size_t>(n) < buffer.size())
-            return fs::path(std::string(buffer.data(), static_cast<std::size_t>(n)))
-                .parent_path();
+            return fs::path(std::string(buffer.data(), static_cast<std::size_t>(n)));
         buffer.resize(buffer.size() * 2);
     }
 #else
     return {};
 #endif
+}
+
+fs::path executable_dir() {
+    const fs::path file = executable_file();
+    return file.empty() ? fs::path{} : file.parent_path();
 }
 
 std::vector<fs::path> path_dirs() {
@@ -86,6 +90,10 @@ std::vector<fs::path> path_dirs() {
     return dirs;
 }
 }  // namespace
+
+fs::path executable_path() {
+    return executable_file();
+}
 
 fs::path find_steamcmd() {
     for (const char* var : {"PZMODMGR_STEAMCMD", "STEAMCMD"}) {

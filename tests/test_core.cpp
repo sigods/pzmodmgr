@@ -4,6 +4,7 @@
 #include "core/mod_manager.hpp"
 #include "core/paths.hpp"
 #include "core/steamcmd.hpp"
+#include "core/updater.hpp"
 #include "core/url.hpp"
 #include "ui/ui.hpp"
 
@@ -170,6 +171,65 @@ void test_atomic_write(const pz::fs::path& root) {
             leftover = true;
     }
     check(!ec && !leftover, "atomic write leaves no temporary file behind");
+}
+
+void test_cache_cleanup(const pz::fs::path& root) {
+    pz::Config cfg;
+    cfg.zomboid_dir = root / "cache-clean" / "Zomboid";
+    cfg.user_mods_dir = cfg.zomboid_dir / "mods";
+    cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
+    cfg.steamcmd_exe = pz::builtin_steamcmd_path(cfg);
+
+    const auto cache = cfg.data_dir / "steam_cache";
+    const auto backups = cfg.data_dir / "backups";
+    write_file(cache / "stale-download" / "payload", "old");
+    write_file(cache / "recent-download" / "payload", "new");
+    write_file(backups / "old-backup" / "payload", "old");
+    write_file(backups / "recent-backup" / "payload", "new");
+
+    const auto stale = pz::fs::file_time_type::clock::now() -
+                       std::chrono::hours(24 * 8);
+    pz::fs::last_write_time(cache / "stale-download", stale);
+    pz::fs::last_write_time(backups / "old-backup", stale);
+
+    pz::ModManager mm(cfg);
+    check(!pz::fs::exists(cache / "stale-download"),
+          "stale download cache is pruned on startup");
+    check(pz::fs::exists(cache / "recent-download"),
+          "recent download cache is kept");
+    check(!pz::fs::exists(backups / "old-backup"),
+          "old manager backup is pruned on startup");
+    check(pz::fs::exists(backups / "recent-backup"),
+          "recent manager backup is kept");
+}
+
+void test_update_cache_cleanup(const pz::fs::path& root) {
+    pz::Config cfg;
+    cfg.zomboid_dir = root / "update-clean" / "Zomboid";
+    cfg.user_mods_dir = cfg.zomboid_dir / "mods";
+    cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
+
+    const auto updates = cfg.data_dir / "updates";
+    write_file(updates / "0.3.0" / "pending.txt", "pid=0\nversion=0.3.0\n");
+    write_file(updates / "0.4.0" / "pending.txt",
+               "pid=" + std::to_string(pz::current_process_id()) +
+                   "\nversion=0.4.0\n");
+    write_file(updates / "recent" / "package.zip", "new");
+    write_file(updates / "old" / "package.zip", "old");
+    const auto stale = pz::fs::file_time_type::clock::now() -
+                       std::chrono::hours(24 * 8);
+    pz::fs::last_write_time(updates / "0.4.0", stale);
+    pz::fs::last_write_time(updates / "old", stale);
+
+    pz::cleanup_update_cache(cfg);
+    check(!pz::fs::exists(updates / "0.3.0"),
+          "abandoned staged update is pruned");
+    check(pz::fs::exists(updates / "0.4.0"),
+          "staged update with a live helper is kept");
+    check(pz::fs::exists(updates / "recent"),
+          "recent update staging folder is kept");
+    check(!pz::fs::exists(updates / "old"),
+          "old update staging folder is pruned");
 }
 
 void test_external_reload(const pz::fs::path& root) {
@@ -483,6 +543,7 @@ void test_activation_formats(const pz::fs::path& root) {
     write_file(z / "mods" / "default.txt",
                "VERSION = 1,\n\nmods\n{\n}\n\nmaps\n{\n}\n");
     write_file(z / "Saves" / "Apocalypse" / "Save1" / "players.db", "");
+    write_file(z / "Saves" / "Apocalypse" / "Save1" / "thumb.png", "preview");
     write_file(z / "Server" / "servertest.ini", "Mods=\nWorkshopItems=\n");
     auto targets = pz::discover_activation_targets(z, "42.21.0");
     check(targets.size() == 3, "default, save, and server targets discovered");
@@ -518,6 +579,9 @@ void test_activation_formats(const pz::fs::path& root) {
           "default.txt still accepts a plain Mod ID after repair");
 
     auto* save = find_target(pz::ActivationKind::Save, "Apocalypse/Save1");
+    check(save != nullptr && save->thumbnail ==
+              z / "Saves" / "Apocalypse" / "Save1" / "thumb.png",
+          "save thumb.png preview discovered");
     check(save != nullptr && pz::write_activation_target(*save, {"Bar"}, {}, true),
           "save mods.txt enable writes");
     check(read_file(save->path).find("mod = Bar,") != std::string::npos,
@@ -568,6 +632,117 @@ void test_collection_parser() {
     auto dup = pz::parse_collection_children(
         R"({"children":[{"publishedfileid":"7"},{"publishedfileid":"7"},{"publishedfileid":"8"}]})");
     check(dup.size() == 2, "duplicate collection children deduped");
+}
+
+void test_activation_default_and_requirements(const pz::fs::path& root) {
+    const pz::fs::path z = root / "ActivationRequirements";
+    pz::Config cfg;
+    cfg.zomboid_dir = z;
+    cfg.user_mods_dir = z / "mods";
+    cfg.data_dir = z / "pzmodmgr";
+    cfg.config_file = cfg.data_dir / "config.ini";
+    write_file(z / "mods" / "default.txt",
+               "VERSION = 1,\n\nmods\n{\n}\n\nmaps\n{\n}\n");
+    write_file(z / "Saves" / "Apocalypse" / "Save1" / "players.db", "");
+    write_file(cfg.user_mods_dir / "BaseReq" / "mod.info",
+               "id=BaseReq\nname=Base Requirement\n");
+    write_file(cfg.user_mods_dir / "ExtraReq" / "mod.info",
+               "id=ExtraReq\nname=Extra Requirement\nrequire=BaseReq\n");
+    write_file(cfg.user_mods_dir / "Owner" / "mod.info",
+               "id=OwnerMod\nname=Owner\nrequire=ExtraReq\n");
+
+    pz::ModManager mm(cfg);
+    std::vector<std::string> log;
+    auto logfn = [&](const std::string& line) { log.push_back(line); };
+    auto enable = mm.set_selection_enabled(pz::ActivationKind::Save,
+        "Apocalypse/Save1", {}, {"Owner"}, true, logfn);
+    check(enable.ok, "save enable succeeds: " + enable.message);
+
+    const std::string defaults = read_file(cfg.user_mods_dir / "default.txt");
+    const std::string save = read_file(
+        z / "Saves" / "Apocalypse" / "Save1" / "mods.txt");
+    for (const char* id : {"OwnerMod", "ExtraReq", "BaseReq"}) {
+        const std::string line = std::string("mod = ") + id + ",";
+        check(defaults.find(line) != std::string::npos,
+              "save enable also writes Default: " + std::string(id));
+        check(save.find(line) != std::string::npos,
+              "save enable writes recursive requirement: " + std::string(id));
+    }
+    check(std::find(log.begin(), log.end(),
+              "auto-enabled required mod ExtraReq (needed by OwnerMod)") != log.end(),
+          "required mod auto-enable is logged");
+
+    auto disable = mm.set_selection_enabled(pz::ActivationKind::Save,
+        "Apocalypse/Save1", {}, {"Owner"}, false, logfn);
+    check(disable.ok, "save disable succeeds: " + disable.message);
+    check(read_file(z / "Saves" / "Apocalypse" / "Save1" / "mods.txt")
+                  .find("mod = OwnerMod,") == std::string::npos,
+          "save disable removes the selected mod");
+    check(read_file(cfg.user_mods_dir / "default.txt")
+                  .find("mod = OwnerMod,") != std::string::npos,
+          "save disable leaves the global Default entry alone");
+}
+
+void test_updater_hash(const pz::fs::path& root) {
+    const pz::fs::path file = root / "updater-hash" / "abc.bin";
+    write_file(file, "abc");
+    std::string hex, detail;
+    check(pz::sha256_file(file, hex, detail),
+          "SHA-256 file read succeeds: " + detail);
+    check(hex == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "SHA-256 known vector matches: " + hex);
+
+    write_file(file, "");
+    check(pz::sha256_file(file, hex, detail),
+          "empty SHA-256 file read succeeds: " + detail);
+    check(hex == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "empty SHA-256 matches: " + hex);
+
+    write_file(file, "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+    check(pz::sha256_file(file, hex, detail),
+          "multi-block SHA-256 file read succeeds: " + detail);
+    check(hex == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+          "multi-block SHA-256 matches: " + hex);
+    check(!pz::sha256_file(root / "updater-hash" / "missing.bin", hex, detail),
+          "missing file has no SHA-256");
+}
+
+void test_updater_parser() {
+    const std::string json = R"({
+        "tag_name": "v0.3.0",
+        "assets": [
+            {"name": "PZModManager-0.3.0-win64-setup.exe",
+             "browser_download_url": "https://example/setup.exe", "size": 10},
+            {"name": "PZModManager-0.3.0-win64.zip",
+             "browser_download_url": "https://example/win.zip", "size": 123,
+             "digest": "sha256:abc"},
+            {"name": "PZModManager-0.3.0-linux-x86_64.tar.gz",
+             "browser_download_url": "https://example/linux.tar.gz", "size": 456,
+             "digest": "sha256:def"}
+        ]
+    })";
+
+    check(pz::app_version_newer("v0.3.0", "0.2.1"), "newer version detected");
+    check(!pz::app_version_newer("0.2.1", "0.2.1"), "same version is not newer");
+    check(!pz::app_version_newer("0.2.0", "0.2.1"), "older version is not newer");
+
+    auto win = pz::parse_latest_app_release(json, "0.2.1", "win");
+    check(win.ok && win.available && win.latest_version == "0.3.0",
+          "Windows release parsed");
+    check(win.asset_name == "PZModManager-0.3.0-win64.zip" &&
+              win.asset_url == "https://example/win.zip" &&
+              win.asset_size == 123 && win.asset_digest == "sha256:abc",
+          "Windows zip asset selected, setup ignored");
+
+    auto linux_release = pz::parse_latest_app_release(json, "0.2.1", "linux");
+    check(linux_release.ok && linux_release.available &&
+              linux_release.asset_name == "PZModManager-0.3.0-linux-x86_64.tar.gz",
+          "Linux tar.gz asset selected");
+
+    auto current = pz::parse_latest_app_release(json, "0.3.0", "win");
+    check(current.ok && !current.available, "current release reports up to date");
+    check(!pz::parse_latest_app_release("{}", "0.2.1", "win").ok,
+          "release without a tag is rejected");
 }
 
 void test_install_flow(const pz::fs::path& root) {
@@ -1008,12 +1183,17 @@ int main() {
     test_builtin_steamcmd(root);
     test_config_paths(root);
     test_atomic_write(root);
+    test_cache_cleanup(root);
+    test_update_cache_cleanup(root);
     test_external_reload(root);
     test_read_mod_info(root);
     test_missing_requirements(root);
     test_discover_mod_roots(root);
     test_time_updated_parser();
     test_activation_formats(root);
+    test_activation_default_and_requirements(root);
+    test_updater_hash(root);
+    test_updater_parser();
     test_ui_helpers();
     test_published_result_parser();
     test_collection_parser();

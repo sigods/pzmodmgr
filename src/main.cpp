@@ -1,5 +1,6 @@
 #include "core/commands.hpp"
 #include "core/paths.hpp"
+#include "core/updater.hpp"
 #include "ui/ui.hpp"
 #include <cstdio>
 
@@ -8,8 +9,14 @@ namespace pz {
 // Windows links pzmodmgr as a GUI-subsystem program (no console window), so the
 // command line is decoded there and handed over as a narrow argv.
 int run_app(int argc, char** argv) {
+    // The self-updater re-launches a copy of this executable with this flag.
+    // It waits for the current process, swaps the installation atomically, and
+    // restarts the new build without loading the UI or the mod database.
+    if (is_update_helper_invocation(argc, argv)) return run_update_helper(argc, argv);
+
     Config cfg = default_config();
     load_config(cfg);
+    cleanup_update_cache(cfg);
     ModManager mm(cfg);
 
     if (argc > 1) {  // CLI mode: pzmodmgr add https://steamcommunity.com/...?id=123

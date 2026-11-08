@@ -87,11 +87,32 @@ The setup reuses a registered previous install directory, so a newer setup
 upgrades in place instead of creating a second copy. The Linux installer follows
 the existing `~/.local/bin/pzmodmgr` symlink for the same behavior.
 
+An installed or portable copy can also update itself from the latest GitHub
+release. Use `Update app` in either native UI, or run:
+
+```bash
+./pzmodmgr self-update
+```
+
+Abandoned staged releases and crashed download caches are pruned on startup;
+manager-created backups older than a week and downloads older than a day are
+removed. A staged update whose helper is still running is always preserved.
+
+Releases are published by `.github/workflows/release.yml`. Push a `v*` tag that
+matches the CMake project version; the workflow builds and attaches the Linux
+`.sh`/`.tar.gz` and Windows `.zip`/setup artifacts plus `SHA256SUMS`.
+
+The release archive is checked against GitHub's SHA-256 digest when one is
+available. A detached helper then waits for pzmodmgr to close, swaps the whole
+installation folder, keeps `config.ini` and uninstall metadata, and restarts
+the new version. The helper needs write access beside the executable for the
+temporary sibling folders used during the swap.
+
 Linux distribution (single self-extracting `.sh` with a `.desktop` entry):
 
 ```bash
 ./scripts/package_linux.sh
-./dist/PZModManager-0.2.1-linux-x86_64.sh
+./dist/PZModManager-0.2.2-linux-x86_64.sh
 ```
 
 GCC/Clang Release builds (Linux and the MinGW Windows build) default to size

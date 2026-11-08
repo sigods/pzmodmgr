@@ -224,14 +224,14 @@ std::string rewrite_block_mod_ids(const std::string& text,
     if (open >= 0 && close > open) {
         std::vector<std::string> out;
         out.reserve(lines.size() + mod_ids.size());
-        out.insert(out.end(), lines.begin(), lines.begin() + open);
+	out.insert(out.end(), lines.begin(), lines.begin() + mods_line);
         out.insert(out.end(), block.begin(), block.end());
         out.insert(out.end(), lines.begin() + close + 1, lines.end());
         return join_lines(out, crlf);
     }
 
     if (lines.empty()) {
-        std::vector<std::string> fresh{"VERSION = 1,", ""};
+        std::vector<std::string> fresh{"version = 1,", ""};
         fresh.insert(fresh.end(), block.begin(), block.end());
         return join_lines(fresh, crlf);
     }
@@ -360,6 +360,9 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
                               game.path().filename().string();
                 target.label = display_name(target.kind, target.name);
                 target.path = game.path() / "mods.txt";
+                std::error_code thumb_ec;
+                const fs::path thumb = game.path() / "thumb.png";
+                if (fs::is_regular_file(thumb, thumb_ec)) target.thumbnail = thumb;
                 read_activation_target(target);
                 saves.push_back(std::move(target));
             }

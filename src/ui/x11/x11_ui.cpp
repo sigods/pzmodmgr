@@ -78,7 +78,8 @@ struct Palette {
 enum class Btn {
     Nothing, Install, Settings, Update, Remove, UpdateAll, SelectAll, Clear, Copy,
     Save, Cancel, Theme, FilterAll, FilterUpdates, Sort, Check, Enable,
-    ShareServer, EnableTarget, DisableTarget, ShareTargets, CopyNames, CloseTargets
+    ShareServer, SelfUpdate, EnableTarget, DisableTarget, ShareTargets, CopyNames,
+    CloseTargets
 };
 
 bool in_rect(int x, int y, int rx, int ry, int rw, int rh) {
@@ -463,6 +464,7 @@ int run_ui(ModManager& mm) {
     std::string dependency_signature;
 
     std::map<std::string, XImage*> icon_cache;
+    std::map<std::string, XImage*> target_icon_cache;
     std::map<std::string, std::optional<ModInfo>> info_cache;
 
     std::mutex pending_mu;
@@ -555,6 +557,7 @@ int run_ui(ModManager& mm) {
         case Btn::FilterUpdates: return {378, kFilterY, 112, kFilterH};
         case Btn::Check: return {496, kFilterY, 120, kFilterH};
         case Btn::Sort: return {626, kFilterY, 140, kFilterH};
+        case Btn::SelfUpdate: return {440, 24, 108, 30};
         default: return {};
         }
     };
@@ -578,6 +581,7 @@ int run_ui(ModManager& mm) {
         case Btn::Install:
         case Btn::Settings:
         case Btn::ShareServer:
+        case Btn::SelfUpdate:
         case Btn::UpdateAll: return true;
         case Btn::Update:
         case Btn::Remove:
@@ -605,6 +609,7 @@ int run_ui(ModManager& mm) {
         case Btn::Copy: return "Copy IDs";
         case Btn::Enable: return "Enable...";
         case Btn::ShareServer: return "Share server";
+        case Btn::SelfUpdate: return "Update app";
         case Btn::EnableTarget: return "Enable";
         case Btn::DisableTarget: return "Disable";
         case Btn::CopyNames: return "Copy names";
@@ -644,10 +649,10 @@ int run_ui(ModManager& mm) {
             }
             return Btn::Nothing;
         }
-        for (Btn b : {Btn::Install, Btn::ShareServer, Btn::Enable, Btn::Settings,
-                      Btn::Update, Btn::Remove, Btn::UpdateAll, Btn::SelectAll,
-                      Btn::Clear, Btn::Copy, Btn::FilterAll, Btn::FilterUpdates,
-                      Btn::Sort, Btn::Check}) {
+        for (Btn b : {Btn::Install, Btn::ShareServer, Btn::SelfUpdate, Btn::Enable,
+                      Btn::Settings, Btn::Update, Btn::Remove, Btn::UpdateAll,
+                      Btn::SelectAll, Btn::Clear, Btn::Copy, Btn::FilterAll,
+                      Btn::FilterUpdates, Btn::Sort, Btn::Check}) {
             if (!button_enabled(b)) continue;
             Rect r = button_rect(b);
             if (in_rect(x, y, r.x, r.y, r.w, r.h)) return b;
@@ -698,8 +703,9 @@ int run_ui(ModManager& mm) {
         const std::string label = button_label(b);
         const bool show_icon = b != Btn::Settings && b != Btn::Check &&
                                b != Btn::Theme && b != Btn::Enable &&
-                               b != Btn::ShareServer && b != Btn::EnableTarget &&
-                               b != Btn::DisableTarget && b != Btn::CloseTargets &&
+                               b != Btn::ShareServer && b != Btn::SelfUpdate &&
+                               b != Btn::EnableTarget && b != Btn::DisableTarget &&
+                               b != Btn::CloseTargets &&
                                b != Btn::ShareTargets && b != Btn::CopyNames;
         const int icon_w = show_icon ? 18 : 0;
         const int gap = show_icon ? 7 : 0;
@@ -744,6 +750,27 @@ int run_ui(ModManager& mm) {
                 image = make_icon_image(dpy, scr, icon, pal.surface);
         }
         icon_cache[m.folders.front()] = image;
+        return image;
+    };
+
+    auto clear_target_icons = [&]() {
+        for (auto& [path, image] : target_icon_cache) {
+            (void)path;
+            if (image) XDestroyImage(image);
+        }
+        target_icon_cache.clear();
+    };
+
+    auto get_target_icon = [&](const ActivationTarget& target) -> XImage* {
+        if (target.kind != ActivationKind::Save || target.thumbnail.empty()) return nullptr;
+        const std::string key = target.thumbnail.string();
+        auto it = target_icon_cache.find(key);
+        if (it != target_icon_cache.end()) return it->second;
+        ModIcon icon;
+        XImage* image = nullptr;
+        if (load_mod_icon(target.thumbnail, 24, icon))
+            image = make_icon_image(dpy, scr, icon, pal.surface);
+        target_icon_cache[key] = image;
         return image;
     };
 
@@ -983,8 +1010,17 @@ int run_ui(ModManager& mm) {
                     : std::to_string(count) + " of " +
                       std::to_string(target_mod_ids.size()) + " on";
                 const int state_w = text_width(body, state);
-                text(dpy, win, gc, body, row.x + 12, row.y + row.h / 2 + 5,
-                     elide(body, target.label, row.w - state_w - 36), pal.text);
+                XImage* image = get_target_icon(target);
+                if (image) {
+                    XPutImage(dpy, win, gc, image, 0, 0, row.x + 8,
+                              row.y + (row.h - 24) / 2,
+                              static_cast<unsigned>(image->width),
+                              static_cast<unsigned>(image->height));
+                }
+                const int text_x = row.x + (image ? 42 : 12);
+                const int label_w = row.w - state_w - (image ? 54 : 36);
+                text(dpy, win, gc, body, text_x, row.y + row.h / 2 + 5,
+                     elide(body, target.label, label_w), pal.text);
                 text(dpy, win, gc, body, row.x + row.w - 12 - state_w,
                      row.y + row.h / 2 + 5, state,
                      count == 0 ? pal.muted : pal.success);
@@ -1022,6 +1058,7 @@ int run_ui(ModManager& mm) {
         text(dpy, win, gc, body, kMargin + 48, 62,
              "Project Zomboid Workshop installer", pal.muted);
         draw_button(Btn::ShareServer);
+        draw_button(Btn::SelfUpdate);
         draw_button(Btn::Enable);
         draw_button(Btn::Settings);
 
@@ -1351,6 +1388,7 @@ int run_ui(ModManager& mm) {
             }
         }
         activation = mm.activation_targets();
+        clear_target_icons();
         target_offset = 0;
         target_focus = activation.empty() ? -1 : 0;
         if (prefer_server) {
@@ -1812,6 +1850,10 @@ int run_ui(ModManager& mm) {
                     start_command("check");
                     break;
                 }
+                if (b == Btn::SelfUpdate) {
+                    start_command("self-update");
+                    break;
+                }
                 if (b == Btn::Install) {
                     submit();
                     break;
@@ -2129,6 +2171,7 @@ int run_ui(ModManager& mm) {
     if (worker.joinable()) worker.join();
     close_watch();
     clear_icons();
+    clear_target_icons();
     ::close(wake[0]);
     ::close(wake[1]);
     if (heading != body) XFreeFont(dpy, heading);

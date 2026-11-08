@@ -72,8 +72,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     for (auto& arg : storage) argv.push_back(arg.data());
     argv.push_back(nullptr);
 
-    // Without arguments this is the double-click / shortcut case: stay windowless.
-    if (argc > 1) attach_console();
+    // Without arguments this is the double-click / shortcut case: stay
+    // windowless. The detached update helper must also stay windowless.
+    const bool update_helper =
+        argc > 1 && std::string(argv[1]) == "--apply-update";
+    if (argc > 1 && !update_helper) attach_console();
 
     return pz::run_app(argc, argv.data());
 }

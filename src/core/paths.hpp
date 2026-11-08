@@ -1,6 +1,9 @@
 #pragma once
 #include "core/types.hpp"
 namespace pz {
+// Absolute path of the running executable. Empty when it cannot be resolved.
+fs::path executable_path();
+
 Config default_config();
 // Reads config_file (or data_dir/config.ini when config_file is unset) and
 // applies zomboid_dir before rebasing the built-in steamcmd path.

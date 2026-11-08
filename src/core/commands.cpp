@@ -1,6 +1,7 @@
 #include "core/commands.hpp"
 #include "core/paths.hpp"
 #include "core/text.hpp"
+#include "core/updater.hpp"
 #include "core/url.hpp"
 #include <cstdlib>
 #include <string>
@@ -86,6 +87,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         return {missing == 0, msg};
     }
     if (cmd == "check") return mm.check_updates(log);
+    if (cmd == "self-update") return stage_app_update(mm.config(), log);
     if (cmd == "targets") {
         auto targets = mm.activation_targets();
         for (std::size_t i = 0; i < targets.size(); ++i) {

@@ -18,12 +18,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "pzmodmgr contributors"
             VALUE "FileDescription", "Project Zomboid Mod Manager"
-            VALUE "FileVersion", "0.2.1"
+            VALUE "FileVersion", "0.2.2"
             VALUE "InternalName", "pzmodmgr"
             VALUE "LegalCopyright", "Copyright (C) 2026 pzmodmgr contributors. GPL-3.0-only."
             VALUE "OriginalFilename", "pzmodmgr.exe"
             VALUE "ProductName", "PZ Mod Manager"
-            VALUE "ProductVersion", "0.2.1"
+            VALUE "ProductVersion", "0.2.2"
         END
     END
     BLOCK "VarFileInfo"

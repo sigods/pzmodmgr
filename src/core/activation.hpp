@@ -15,6 +15,7 @@ struct ActivationTarget {
     std::string name;    // Default is empty; saves are "Mode/Save"; servers are the ini stem
     std::string label;   // display text
     fs::path path;
+    fs::path thumbnail;  // save's thumb.png preview, when present
     std::vector<std::string> mod_ids;        // as found, without the B42 backslash
     std::vector<std::uint64_t> workshop_ids; // server WorkshopItems= values
     bool backslash = false;                  // server INI writes \ModID; blocks always plain

@@ -2,6 +2,10 @@
 #include "ui/mod_icon.hpp"
 #include "ui/glyphs.hpp"
 #include "core/commands.hpp"
+// Keep std::min/std::max usable; windows.h would otherwise define macros.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <algorithm>
 #include <cctype>
@@ -22,8 +26,8 @@ constexpr int ID_UPDATE = 105, ID_REMOVE = 106, ID_UPDATE_ALL = 107, ID_SETTINGS
 constexpr int ID_SELECT_ALL = 109, ID_CLEAR = 110;
 constexpr int ID_FILTER = 111, ID_FILTER_ALL = 112, ID_FILTER_UPDATES = 113;
 constexpr int ID_SORT = 114, ID_CHECK = 115, ID_COPY = 116, ID_ENABLE = 117;
-constexpr int ID_SHARE_SERVER = 118;
-constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_DARK = 203, ID_SET_AUTO = 204;
+constexpr int ID_SHARE_SERVER = 118, ID_SELF_UPDATE = 119;
+constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_THEME = 203, ID_SET_AUTO = 204;
 constexpr int ID_TGT_LIST = 301, ID_TGT_ENABLE = 302, ID_TGT_DISABLE = 303;
 constexpr int ID_TGT_COPY = 304, ID_TGT_CLOSE = 305, ID_TGT_COPY_NAMES = 306;
 constexpr UINT WM_APP_LOG = WM_APP + 1;
@@ -32,6 +36,24 @@ constexpr UINT WM_APP_RELOAD = WM_APP + 3;
 constexpr UINT_PTR kAutoCheckTimer = 1;
 constexpr int kWindowW = 920, kWindowH = 720;
 constexpr int kRowH = 64;
+
+// Thin flat scrollbars, sized like the X11 ones: a 6px bar with 3px of click
+// slack on each side, drawn in the window instead of by the OS.
+constexpr int kScrollW = 6;
+constexpr int kScrollGrab = 3;
+constexpr int kScrollWinW = kScrollW + 2 * kScrollGrab;
+constexpr int kScrollMinThumb = 24;
+struct ScrollBar {
+    HWND wnd = nullptr;
+    HWND target = nullptr;
+    bool log = false;          // multiline edit instead of a listbox
+    bool on_surface = false;   // background matches a card, not the window
+    bool dragging = false;
+    int drag_offset = 0;
+    int last_total = -1, last_page = -1, last_pos = -1;
+};
+std::vector<ScrollBar*> g_bars;
+
 struct Theme {
     COLORREF bg, surface, field, border, border_strong, text, muted;
     COLORREF accent, accent_hover, accent_soft, danger, danger_soft;
@@ -56,11 +78,14 @@ HWND g_check = nullptr;
 HWND g_list = nullptr;
 HWND g_empty = nullptr;
 WNDPROC g_list_old_proc = nullptr;
+WNDPROC g_log_old_proc = nullptr;
+WNDPROC g_tgt_list_old_proc = nullptr;
 HWND g_log = nullptr;
 HWND g_update = nullptr;
 HWND g_remove = nullptr;
 HWND g_update_all = nullptr;
 HWND g_settings_btn = nullptr;
+HWND g_self_update = nullptr;
 HWND g_enable_btn = nullptr;
 HWND g_share_server_btn = nullptr;
 HWND g_select_all = nullptr;
@@ -75,8 +100,8 @@ HWND g_settings_wnd = nullptr;
 HWND g_set_zomboid = nullptr;
 HWND g_set_path = nullptr;
 HWND g_set_user = nullptr;
-HWND g_set_dark = nullptr;
 HWND g_set_auto = nullptr;
+bool g_settings_dark = false;
 HWND g_targets_wnd = nullptr;
 HWND g_tgt_list = nullptr;
 HWND g_tgt_status = nullptr;
@@ -89,6 +114,7 @@ std::vector<ActivationTarget> g_activation;
 std::vector<std::string> g_target_mod_ids;
 
 HFONT g_font_title = nullptr;
+HFONT g_font_row = nullptr;
 HFONT g_font_brand = nullptr;
 HFONT g_font_body = nullptr;
 HFONT g_font_small = nullptr;
@@ -100,6 +126,7 @@ HBRUSH g_border_brush = nullptr;
 HBRUSH g_accent_brush = nullptr;
 HBRUSH g_brand_brush = nullptr;
 HBRUSH g_brand_soft_brush = nullptr;
+HBRUSH g_border_strong_brush = nullptr;
 
 std::thread g_worker;
 std::thread g_watch_worker;
@@ -118,6 +145,7 @@ std::vector<std::string> g_selected_folders;
 bool g_only_updates = false;
 int g_sort_mode = 0;
 std::map<std::string, HBITMAP> g_icons;
+std::map<std::string, HBITMAP> g_target_icons;
 std::map<std::string, std::optional<ModInfo>> g_info_cache;
 std::string g_dependency_warning;
 std::string g_dependency_signature;
@@ -244,7 +272,8 @@ Theme make_theme(bool dark) {
 void destroy_theme_brushes() {
     for (HBRUSH* brush : {&g_bg_brush, &g_card_brush, &g_field_brush,
                           &g_selected_brush, &g_border_brush, &g_accent_brush,
-                          &g_brand_brush, &g_brand_soft_brush}) {
+                          &g_brand_brush, &g_brand_soft_brush,
+                          &g_border_strong_brush}) {
         if (*brush) DeleteObject(*brush);
         *brush = nullptr;
     }
@@ -259,6 +288,7 @@ void create_theme_brushes() {
     g_accent_brush = CreateSolidBrush(g_theme.accent);
     g_brand_brush = CreateSolidBrush(g_theme.brand);
     g_brand_soft_brush = CreateSolidBrush(g_theme.brand_soft);
+    g_border_strong_brush = CreateSolidBrush(g_theme.border_strong);
 }
 
 void apply_theme(bool dark, HWND hwnd) {
@@ -266,11 +296,383 @@ void apply_theme(bool dark, HWND hwnd) {
     g_theme = make_theme(dark);
     destroy_theme_brushes();
     create_theme_brushes();
+    // Every window class uses a null background brush and erases itself from
+    // the palette, so there is no class brush to keep in sync here.
     if (hwnd) {
-        SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_bg_brush);
         RedrawWindow(hwnd, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
+}
+
+// dwmapi is resolved at run time: the app keeps its current link dependencies
+// and simply keeps a light caption on Windows versions without the attribute.
+void apply_dark_title_bar(HWND hwnd, bool dark) {
+    using SetAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    static SetAttributeFn set_attribute = []() -> SetAttributeFn {
+        HMODULE dll = LoadLibraryW(L"dwmapi.dll");
+        if (!dll) return nullptr;
+        return reinterpret_cast<SetAttributeFn>(
+            reinterpret_cast<void*>(GetProcAddress(dll, "DwmSetWindowAttribute")));
+    }();
+    if (!set_attribute || !hwnd) return;
+    const BOOL value = dark ? TRUE : FALSE;
+    // 20 on Windows 10 2004+, 19 on 1809-1909.
+    if (FAILED(set_attribute(hwnd, 20, &value, sizeof(value))))
+        set_attribute(hwnd, 19, &value, sizeof(value));
+}
+
+// Edit controls draw their own scrollbar from the system theme, ignoring
+// WM_CTLCOLOR. Ask uxtheme for the dark variant where it exists; the
+// AllowDarkModeForWindow entry point is an ordinal, so resolve it dynamically.
+void apply_dark_control_theme(HWND hwnd, bool dark) {
+    using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+    using AllowDarkFn = BOOL(WINAPI*)(HWND, BOOL);
+    static HMODULE uxtheme = LoadLibraryW(L"uxtheme.dll");
+    static SetWindowThemeFn set_theme = uxtheme
+        ? reinterpret_cast<SetWindowThemeFn>(
+              reinterpret_cast<void*>(GetProcAddress(uxtheme, "SetWindowTheme")))
+        : nullptr;
+    static AllowDarkFn allow_dark = uxtheme
+        ? reinterpret_cast<AllowDarkFn>(reinterpret_cast<void*>(
+              GetProcAddress(uxtheme, MAKEINTRESOURCEA(135))))
+        : nullptr;
+    if (!hwnd) return;
+    if (allow_dark) allow_dark(hwnd, dark ? TRUE : FALSE);
+    if (set_theme) set_theme(hwnd, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+}
+
+void invalidate_bars();
+
+void refresh_theme(HWND hwnd, bool dark) {
+    apply_theme(dark, hwnd);
+    apply_dark_title_bar(hwnd, dark);
+    apply_dark_control_theme(g_input, dark);
+    apply_dark_control_theme(g_filter, dark);
+    apply_dark_control_theme(g_log, dark);
+    invalidate_bars();
+}
+
+void fill_color(HDC dc, const RECT& r, COLORREF color) {
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(dc, &r, brush);
+    DeleteObject(brush);
+}
+
+void draw_field_frame(HDC dc, const RECT& field, bool focused) {
+    RECT outer{field.left - 1, field.top - 1, field.right + 1, field.bottom + 1};
+    fill_color(dc, outer, focused ? g_theme.accent : g_theme.border);
+}
+
+// The 18px checkbox from the X11 settings panel.
+void draw_checkbox(HDC dc, int x, int y, bool checked) {
+    RECT box{x, y, x + 18, y + 18};
+    fill_color(dc, box, checked ? g_theme.accent : g_theme.field);
+    HBRUSH frame = CreateSolidBrush(checked ? g_theme.accent : g_theme.border_strong);
+    FrameRect(dc, &box, frame);
+    DeleteObject(frame);
+    if (!checked) return;
+    HPEN pen = CreatePen(PS_SOLID, 2, g_theme.on_accent);
+    HGDIOBJ old = SelectObject(dc, pen);
+    MoveToEx(dc, x + 4, y + 9, nullptr);
+    LineTo(dc, x + 7, y + 12);
+    LineTo(dc, x + 14, y + 4);
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+// Buttons in the modal windows: same flat look as the main toolbar, without
+// the glyphs (the glyph set only covers the main actions).
+void draw_dialog_button(const DRAWITEMSTRUCT* dis, bool primary) {
+    if (!dis) return;
+    const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+    const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    RECT r = dis->rcItem;
+    COLORREF fill = g_theme.surface;
+    COLORREF border = g_theme.border;
+    COLORREF text = g_theme.text;
+    if (disabled) {
+        fill = g_theme.bg;
+        text = g_theme.muted;
+    } else if (primary) {
+        fill = pressed ? g_theme.accent_hover : g_theme.accent;
+        border = fill;
+        text = g_theme.on_accent;
+    } else if (pressed) {
+        fill = g_theme.hover;
+        border = g_theme.brand_border;
+    }
+    fill_color(dis->hDC, r, fill);
+    HBRUSH frame = CreateSolidBrush(border);
+    FrameRect(dis->hDC, &r, frame);
+    DeleteObject(frame);
+
+    wchar_t label[128]{};
+    GetWindowTextW(dis->hwndItem, label, 127);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, text);
+    HGDIOBJ old = SelectObject(dis->hDC, g_font_body);
+    DrawTextW(dis->hDC, label, -1, &r,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dis->hDC, old);
+}
+
+// --- thin scrollbars -------------------------------------------------------
+
+struct ScrollMetrics {
+    int total = 0;
+    int page = 1;
+    int pos = 0;
+    bool needed = false;
+};
+
+int edit_page_lines(HWND edit) {
+    RECT rc{};
+    GetClientRect(edit, &rc);
+    HDC dc = GetDC(edit);
+    if (!dc) return 1;
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(edit, WM_GETFONT, 0, 0));
+    HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(edit, dc);
+    const int height = static_cast<int>(rc.bottom - rc.top);
+    return tm.tmHeight > 0 ? std::max(1, height / static_cast<int>(tm.tmHeight))
+                           : 1;
+}
+
+ScrollMetrics bar_metrics(const ScrollBar& bar) {
+    ScrollMetrics m;
+    RECT rc{};
+    GetClientRect(bar.target, &rc);
+    if (!bar.log) {
+        m.total = static_cast<int>(SendMessageW(bar.target, LB_GETCOUNT, 0, 0));
+        const int item_h =
+            static_cast<int>(SendMessageW(bar.target, LB_GETITEMHEIGHT, 0, 0));
+        m.page = item_h > 0
+            ? std::max(1, static_cast<int>(rc.bottom - rc.top) / item_h)
+            : 1;
+        m.pos = static_cast<int>(SendMessageW(bar.target, LB_GETTOPINDEX, 0, 0));
+    } else {
+        m.total = static_cast<int>(SendMessageW(bar.target, EM_GETLINECOUNT, 0, 0));
+        m.pos = static_cast<int>(SendMessageW(bar.target, EM_GETFIRSTVISIBLELINE, 0, 0));
+        m.page = edit_page_lines(bar.target);
+    }
+    if (m.total < 0) m.total = 0;
+    if (m.page < 1) m.page = 1;
+    m.pos = std::min(std::max(0, m.pos), std::max(0, m.total - m.page));
+    m.needed = m.total > m.page;
+    return m;
+}
+
+int thumb_height(const ScrollMetrics& m, int track) {
+    int h = track * m.page / std::max(1, m.total);
+    h = std::max(kScrollMinThumb, h);
+    return std::min(h, track);
+}
+
+bool thumb_rect(const ScrollBar& bar, const ScrollMetrics& m, RECT& thumb) {
+    RECT rc{};
+    GetClientRect(bar.wnd, &rc);
+    const int track = rc.bottom - rc.top;
+    if (!m.needed || track <= 0) return false;
+    const int h = thumb_height(m, track);
+    const int travel = track - h;
+    const int max_pos = std::max(1, m.total - m.page);
+    const int y = travel * m.pos / max_pos;
+    thumb = {kScrollGrab, y, kScrollGrab + kScrollW, y + h};
+    return true;
+}
+
+void update_count_label();
+
+void bar_scroll_to(ScrollBar& bar, int pos) {
+    const ScrollMetrics m = bar_metrics(bar);
+    pos = std::min(std::max(0, pos), std::max(0, m.total - m.page));
+    if (!bar.log) {
+        SendMessageW(bar.target, LB_SETTOPINDEX, pos, 0);
+    } else {
+        const int delta = pos - static_cast<int>(
+            SendMessageW(bar.target, EM_GETFIRSTVISIBLELINE, 0, 0));
+        if (delta != 0) SendMessageW(bar.target, EM_LINESCROLL, 0, delta);
+    }
+    bar.last_total = m.total;
+    bar.last_page = m.page;
+    bar.last_pos = pos;
+    InvalidateRect(bar.wnd, nullptr, FALSE);
+    if (!bar.log) update_count_label();
+}
+
+// The counter beside the filter row: the X11 UI shows "1-5 of 12" while the
+// list is scrolled, so the visible window into the mods is always obvious.
+void update_count_label() {
+    if (!g_count || !g_list) return;
+    const int total = static_cast<int>(SendMessageW(g_list, LB_GETCOUNT, 0, 0));
+    const int item_h =
+        static_cast<int>(SendMessageW(g_list, LB_GETITEMHEIGHT, 0, 0));
+    RECT rc{};
+    GetClientRect(g_list, &rc);
+    const int rows = item_h > 0
+        ? std::max(1, static_cast<int>(rc.bottom - rc.top) / item_h)
+        : 1;
+    int first = static_cast<int>(SendMessageW(g_list, LB_GETTOPINDEX, 0, 0));
+    if (first < 0) first = 0;
+
+    std::wstring text;
+    if (g_busy) {
+        text = L"Working...";
+    } else if (total <= 0) {
+        text = L"0 mods";
+    } else if (total <= rows) {
+        text = to_w(std::to_string(total)) + (total == 1 ? L" mod" : L" mods");
+    } else {
+        const int last = std::min(total, first + rows);
+        text = to_w(std::to_string(first + 1) + "-" + std::to_string(last) +
+                    " of " + std::to_string(total));
+    }
+    static std::wstring shown;
+    if (text == shown) return;
+    shown = text;
+    SetWindowTextW(g_count, text.c_str());
+}
+
+void sync_bars() {
+    for (ScrollBar* bar : g_bars) {
+        if (!bar || !bar->wnd) continue;
+        const ScrollMetrics m = bar_metrics(*bar);
+        if (m.total != bar->last_total || m.page != bar->last_page ||
+            m.pos != bar->last_pos) {
+            bar->last_total = m.total;
+            bar->last_page = m.page;
+            bar->last_pos = m.pos;
+            InvalidateRect(bar->wnd, nullptr, FALSE);
+        }
+    }
+    update_count_label();
+}
+
+void invalidate_bars() {
+    for (ScrollBar* bar : g_bars) {
+        if (!bar || !bar->wnd) continue;
+        bar->last_total = -1;   // force a repaint with the new palette
+        InvalidateRect(bar->wnd, nullptr, FALSE);
+    }
+}
+
+void paint_scrollbar(const ScrollBar& bar, HDC dc) {
+    RECT rc{};
+    GetClientRect(bar.wnd, &rc);
+    fill_color(dc, rc, bar.on_surface ? g_theme.surface : g_theme.bg);
+    const ScrollMetrics m = bar_metrics(bar);
+    if (!m.needed) return;
+    RECT track{kScrollGrab, 0, kScrollGrab + kScrollW, rc.bottom};
+    FillRect(dc, &track, g_border_brush);
+    RECT thumb{};
+    if (thumb_rect(bar, m, thumb))
+        FillRect(dc, &thumb, bar.dragging ? g_accent_brush : g_border_strong_brush);
+}
+
+LRESULT CALLBACK ScrollProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* bar = reinterpret_cast<ScrollBar*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        if (bar) paint_scrollbar(*bar, dc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        if (!bar) return 0;
+        SetFocus(bar->target);
+        const int y = static_cast<short>(HIWORD(lp));
+        const ScrollMetrics m = bar_metrics(*bar);
+        RECT thumb{};
+        if (thumb_rect(*bar, m, thumb) && y >= thumb.top - kScrollGrab &&
+            y < thumb.bottom + kScrollGrab) {
+            bar->dragging = true;
+            bar->drag_offset = y - thumb.top;
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (m.needed) {
+            bar_scroll_to(*bar, y < thumb.top ? m.pos - m.page : m.pos + m.page);
+        }
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (!bar || !bar->dragging) return 0;
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        const ScrollMetrics m = bar_metrics(*bar);
+        const int track = rc.bottom - rc.top;
+        const int travel = track - thumb_height(m, track);
+        const int max_pos = std::max(0, m.total - m.page);
+        if (travel > 0 && max_pos > 0) {
+            const int y = static_cast<short>(HIWORD(lp));
+            const int offset = std::min(std::max(0, y - bar->drag_offset), travel);
+            bar_scroll_to(*bar, (offset * max_pos + travel / 2) / travel);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        if (bar && bar->dragging) {
+            bar->dragging = false;
+            ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (bar && bar->dragging) {
+            bar->dragging = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (bar) SendMessageW(bar->target, WM_MOUSEWHEEL, wp, lp);
+        return 0;
+    case WM_NCDESTROY: {
+        auto it = std::find(g_bars.begin(), g_bars.end(), bar);
+        if (it != g_bars.end()) g_bars.erase(it);
+        delete bar;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    }
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void register_scrollbar_class() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = ScrollProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PZScrollBar";
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    RegisterClassW(&wc);
+    registered = true;
+}
+
+HWND create_scrollbar(HWND parent, HWND target, bool log, bool on_surface,
+                      int x, int y, int w, int h) {
+    register_scrollbar_class();
+    HWND bar = CreateWindowExW(0, L"PZScrollBar", L"", WS_CHILD | WS_VISIBLE,
+                               x, y, w, h, parent, nullptr,
+                               GetModuleHandleW(nullptr), nullptr);
+    if (!bar) return nullptr;
+    auto* state = new ScrollBar;
+    state->wnd = bar;
+    state->target = target;
+    state->log = log;
+    state->on_surface = on_surface;
+    g_bars.push_back(state);
+    SetWindowLongPtrW(bar, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    sync_bars();
+    return bar;
 }
 
 void set_font(HWND h, HFONT font) {
@@ -295,6 +697,7 @@ void append_log(const std::string& line) {
     int len = GetWindowTextLengthW(g_log);
     SendMessageW(g_log, EM_SETSEL, len, len);
     SendMessageW(g_log, EM_REPLACESEL, FALSE, (LPARAM)w.c_str());
+    sync_bars();
 }
 
 void set_status(const std::string& s) {
@@ -324,6 +727,7 @@ void update_actions() {
     EnableWindow(g_add, !g_busy);
     EnableWindow(g_update_all, !g_busy);
     EnableWindow(g_settings_btn, !g_busy);
+    EnableWindow(g_self_update, !g_busy);
     EnableWindow(g_share_server_btn, !g_busy);
     EnableWindow(g_select_all, !g_busy && !g_row_ids.empty());
     EnableWindow(g_clear, !g_busy && has_any);
@@ -385,32 +789,45 @@ std::vector<std::string> selected_folders() {
     return folders;
 }
 
+std::vector<std::wstring> selected_row_names() {
+    std::vector<std::wstring> names;
+    for (std::size_t i = 0; i < g_row_names.size(); ++i) {
+        const std::uint64_t id = i < g_row_ids.size() ? g_row_ids[i] : 0;
+        const bool selected = id != 0
+            ? std::find(g_selected_ids.begin(), g_selected_ids.end(), id) !=
+                  g_selected_ids.end()
+            : i < g_row_folders.size() &&
+                  std::find(g_selected_folders.begin(), g_selected_folders.end(),
+                            g_row_folders[i]) != g_selected_folders.end();
+        if (selected) names.push_back(g_row_names[i]);
+    }
+    return names;
+}
+
 void set_details() {
-    const std::size_t total = g_selected_ids.size() + g_selected_folders.size();
-    if (total == 0) {
+    const auto names = selected_row_names();
+    if (names.empty()) {
         SetWindowTextW(g_details, L"No selection");
         return;
     }
-    if (total > 1) {
-        SetWindowTextW(g_details,
-            (to_w(std::to_string(total)) + L" selected").c_str());
-        return;
+    std::wstring text;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        if (i != 0) text += L", ";
+        text += names[i];
     }
-    int index = -1;
-    SendMessageW(g_list, LB_GETSELITEMS, 1, (LPARAM)&index);
-    std::wstring name = (index >= 0 && index < (int)g_row_names.size())
-        ? g_row_names[(std::size_t)index] : L"1 selected";
-    SetWindowTextW(g_details, (L"Selected: " + name).c_str());
+    // The static control uses SS_ENDELLIPSIS, so a long selection stays on one
+    // line while still naming every selected mod.
+    SetWindowTextW(g_details, text.c_str());
 }
 
-HBITMAP load_icon_bitmap(const fs::path& path) {
+HBITMAP load_icon_bitmap(const fs::path& path, int size = 48) {
     ModIcon icon;
-    if (path.empty() || !load_mod_icon(path, 48, icon)) return nullptr;
+    if (path.empty() || size <= 0 || !load_mod_icon(path, size, icon)) return nullptr;
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = 48;
-    bmi.bmiHeader.biHeight = -48;
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = -size;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -422,9 +839,9 @@ HBITMAP load_icon_bitmap(const fs::path& path) {
     const int bg_r = GetRValue(g_theme.surface);
     const int bg_g = GetGValue(g_theme.surface);
     const int bg_b = GetBValue(g_theme.surface);
-    for (int y = 0; y < 48; ++y) {
-        for (int x = 0; x < 48; ++x) {
-            const std::size_t src = (static_cast<std::size_t>(y) * 48 + x) * 4;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const std::size_t src = (static_cast<std::size_t>(y) * size + x) * 4;
             const std::size_t dst = src;
             const int a = icon.rgba[src + 3];
             pixels[dst + 0] = static_cast<std::uint8_t>(
@@ -446,6 +863,23 @@ void clear_icons() {
     }
     g_icons.clear();
     g_info_cache.clear();
+}
+
+void clear_target_icons() {
+    for (auto& [path, bitmap] : g_target_icons) {
+        (void)path;
+        if (bitmap) DeleteObject(bitmap);
+    }
+    g_target_icons.clear();
+}
+
+HBITMAP target_icon_bitmap(const ActivationTarget& target) {
+    if (target.kind != ActivationKind::Save || target.thumbnail.empty()) return nullptr;
+    const std::string key = target.thumbnail.string();
+    auto it = g_target_icons.find(key);
+    if (it == g_target_icons.end())
+        it = g_target_icons.emplace(key, load_icon_bitmap(target.thumbnail, 36)).first;
+    return it->second;
 }
 
 const std::optional<ModInfo>& info_for_cached(const std::string& folder) {
@@ -522,9 +956,6 @@ void refresh_list() {
         if (selected) SendMessageW(g_list, LB_SETSEL, TRUE, (LPARAM)i);
     }
 
-    SetWindowTextW(g_count,
-        (to_w(std::to_string(g_row_ids.size())) +
-         (g_row_ids.size() == 1 ? L" mod" : L" mods")).c_str());
     if (g_empty) {
         const bool filtered = !filter.empty() || g_only_updates;
         SetWindowTextW(g_empty,
@@ -534,6 +965,7 @@ void refresh_list() {
     }
     SetWindowTextW(g_sort, g_sort_mode == 0 ? L"Sort: Name" : L"Sort: Updated");
     for (HWND b : {g_filter_all, g_filter_updates, g_sort}) InvalidateRect(b, nullptr, TRUE);
+    sync_bars();
     update_actions();
     set_details();
     set_status(g_dependency_warning.empty() ? "Ready" : g_dependency_warning);
@@ -575,7 +1007,69 @@ LRESULT CALLBACK ListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
     }
-    return CallWindowProcW(g_list_old_proc, hwnd, msg, wp, lp);
+    const LRESULT result = CallWindowProcW(g_list_old_proc, hwnd, msg, wp, lp);
+    switch (msg) {
+    case WM_MOUSEWHEEL:
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_CHAR:
+    case WM_LBUTTONUP:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_SIZE:
+    case WM_SETREDRAW:
+    case WM_TIMER:
+        sync_bars();
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+
+LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    const LRESULT result = CallWindowProcW(g_log_old_proc, hwnd, msg, wp, lp);
+    switch (msg) {
+    case WM_MOUSEWHEEL:
+    case WM_VSCROLL:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_CHAR:
+    case WM_LBUTTONUP:
+    case WM_SIZE:
+    case WM_SETREDRAW:
+    case WM_TIMER:
+        sync_bars();
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+
+// The targets list scrolls itself; keep its bar in step the same way.
+LRESULT CALLBACK TargetsListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    const LRESULT result = CallWindowProcW(g_tgt_list_old_proc, hwnd, msg, wp, lp);
+    switch (msg) {
+    case WM_MOUSEWHEEL:
+    case WM_VSCROLL:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_CHAR:
+    case WM_LBUTTONUP:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_SIZE:
+    case WM_SETREDRAW:
+    case WM_TIMER:
+        sync_bars();
+        break;
+    default:
+        break;
+    }
+    return result;
 }
 
 void select_all() {
@@ -681,6 +1175,7 @@ void start_command(const std::string& line) {
     EnableWindow(g_list, FALSE);
     EnableWindow(g_filter, FALSE);
     update_actions();
+    update_count_label();
     set_status("Working - steamcmd may take a while...");
 
     if (g_worker.joinable()) g_worker.join();
@@ -691,6 +1186,7 @@ void start_command(const std::string& line) {
         EnableWindow(g_input, TRUE);
         EnableWindow(g_list, TRUE);
         update_actions();
+        update_count_label();
         set_status("Ready");
         append_log(std::string("ERROR: cannot start worker: ") + e.what());
     }
@@ -918,7 +1414,8 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     HGDIOBJ old = SelectObject(dis->hDC, g_font_body);
     SIZE size{};
     GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
-    const bool show_icon = id != ID_SETTINGS && id != ID_CHECK;
+    const bool show_icon = id != ID_SETTINGS && id != ID_CHECK &&
+                           id != ID_SELF_UPDATE;
     const int icon_w = show_icon ? 18 : 0;
     const int gap = show_icon ? 7 : 0;
     const int start = r.left + (r.right - r.left - icon_w - gap - size.cx) / 2;
@@ -979,15 +1476,15 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
 
     SetBkMode(dis->hDC, TRANSPARENT);
     SetTextColor(dis->hDC, g_theme.text);
-    HGDIOBJ old_font = SelectObject(dis->hDC, g_font_title);
+    HGDIOBJ old_font = SelectObject(dis->hDC, g_font_row);
     const int text_right = card.right - (has_update ? (switchable ? 256 : 132)
                                                    : (switchable ? 198 : 50));
-    RECT name_rc{card.left + 72, card.top + 9, text_right, card.top + 31};
+    RECT name_rc{card.left + 72, card.top + 7, text_right, card.top + 34};
     DrawTextW(dis->hDC, g_row_names[index].c_str(), -1, &name_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dis->hDC, g_font_small);
     SetTextColor(dis->hDC, g_theme.muted);
-    RECT meta_rc{card.left + 72, card.top + 32, text_right, card.top + 54};
+    RECT meta_rc{card.left + 72, card.top + 34, text_right, card.top + 57};
     DrawTextW(dis->hDC, g_row_meta[index].c_str(), -1, &meta_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
@@ -1036,88 +1533,214 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     SelectObject(dis->hDC, old_font);
 }
 
+// Settings dialog layout, mirroring the X11 panel.
+constexpr int kSetClientW = 660, kSetClientH = 470;
+constexpr int kSetPanelX = 24, kSetPanelY = 72, kSetPanelW = 612, kSetPanelH = 380;
+constexpr int kSetFieldX = 56, kSetFieldW = 548, kSetFieldH = 38;
+constexpr int kSetZomboidY = 116, kSetPathY = 190, kSetUserY = 264;
+constexpr int kSetCheckY = 310, kSetButtonsY = 396;
+
+// Targets dialog: the same panel as Settings, with a borderless list.
+constexpr int kTgtListX = 56, kTgtListY = 104, kTgtListW = 548, kTgtListH = 264;
+constexpr int kTgtRowH = 44, kTgtBarX = 615;
+constexpr int kTgtStatusY = 374;
+constexpr int kTgtButtonsY = 410, kTgtButtonH = 38;
+
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
         g_settings_wnd = hwnd;
+        g_settings_dark = g_mm->config().dark_mode;
+        apply_dark_title_bar(hwnd, g_settings_dark);
         {
-            HWND label = CreateWindowW(L"STATIC",
-                L"Zomboid folder (absolute path; contains mods and pzmodmgr):",
-                WS_CHILD | WS_VISIBLE, 24, 20, 570, 20, hwnd, nullptr, nullptr, nullptr);
-            set_font(label, g_font_body);
-            g_set_zomboid = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
-                24, 44, 560, 28, hwnd, nullptr, nullptr, nullptr);
-            set_font(g_set_zomboid, g_font_body);
-            label = CreateWindowW(L"STATIC", L"steamcmd executable (blank = built-in):",
-                WS_CHILD | WS_VISIBLE, 24, 86, 560, 20, hwnd, nullptr, nullptr, nullptr);
-            set_font(label, g_font_body);
-            g_set_path = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
-                24, 110, 560, 28, hwnd, nullptr, nullptr, nullptr);
-            set_font(g_set_path, g_font_body);
-            label = CreateWindowW(L"STATIC", L"Steam username:",
-                WS_CHILD | WS_VISIBLE, 24, 152, 560, 20, hwnd, nullptr, nullptr, nullptr);
-            set_font(label, g_font_body);
-            g_set_user = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
-                24, 176, 560, 28, hwnd, nullptr, nullptr, nullptr);
-            set_font(g_set_user, g_font_body);
-            label = CreateWindowW(L"STATIC",
-                L"No password is stored. Run steamcmd manually once so its login is cached.",
-                WS_CHILD | WS_VISIBLE, 24, 216, 570, 20, hwnd, nullptr, nullptr, nullptr);
-            set_font(label, g_font_small);
-            label = CreateWindowW(L"STATIC",
-                L"Use anonymous for public Workshop items.",
-                WS_CHILD | WS_VISIBLE, 24, 234, 570, 20, hwnd, nullptr, nullptr, nullptr);
-            set_font(label, g_font_small);
-            g_set_dark = CreateWindowW(L"BUTTON", L"Dark mode",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-                24, 260, 180, 22, hwnd, (HMENU)ID_SET_DARK, nullptr, nullptr);
-            set_font(g_set_dark, g_font_body);
+            // Only the three text fields stay native (input, IME, clipboard).
+            // They have no border: WM_PAINT frames them so the frame follows
+            // the palette and the keyboard focus, as in the X11 dialog.
+            auto make_field = [&](int y) {
+                HWND edit = CreateWindowW(L"EDIT", L"",
+                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+                    kSetFieldX, y, kSetFieldW, kSetFieldH, hwnd, nullptr, nullptr,
+                    nullptr);
+                set_font(edit, g_font_body);
+                SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                             MAKELPARAM(12, 12));
+                apply_dark_control_theme(edit, g_settings_dark);
+                return edit;
+            };
+            g_set_zomboid = make_field(kSetZomboidY);
+            g_set_path = make_field(kSetPathY);
+            g_set_user = make_field(kSetUserY);
+
             g_set_auto = CreateWindowW(L"BUTTON",
                 L"Enable newly installed mods in mods/default.txt",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-                24, 286, 430, 22, hwnd, (HMENU)ID_SET_AUTO, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+                kSetFieldX, kSetCheckY, 470, 24, hwnd, (HMENU)ID_SET_AUTO,
+                nullptr, nullptr);
             set_font(g_set_auto, g_font_body);
+
             HWND save = CreateWindowW(L"BUTTON", L"Save",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 24, 320, 120, 30, hwnd,
-                (HMENU)ID_SET_SAVE, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kSetFieldX, kSetButtonsY,
+                120, 38, hwnd, (HMENU)ID_SET_SAVE, nullptr, nullptr);
             set_font(save, g_font_body);
             HWND cancel = CreateWindowW(L"BUTTON", L"Cancel",
-                WS_CHILD | WS_VISIBLE, 158, 320, 120, 30, hwnd,
-                (HMENU)ID_SET_CANCEL, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kSetFieldX + 136,
+                kSetButtonsY, 120, 38, hwnd, (HMENU)ID_SET_CANCEL, nullptr,
+                nullptr);
             set_font(cancel, g_font_body);
+            HWND theme = CreateWindowW(L"BUTTON",
+                g_settings_dark ? L"Theme: Dark" : L"Theme: Light",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, kSetFieldX + 280,
+                kSetButtonsY, 190, 38, hwnd, (HMENU)ID_SET_THEME, nullptr,
+                nullptr);
+            set_font(theme, g_font_body);
         }
 
         SetWindowTextW(g_set_zomboid,
                        to_w(g_mm->config().zomboid_dir.string()).c_str());
         SetWindowTextW(g_set_path, to_w(g_mm->config().steamcmd_exe.string()).c_str());
         SetWindowTextW(g_set_user, to_w(g_mm->config().steam_user).c_str());
-        SendMessageW(g_set_dark, BM_SETCHECK,
-                     g_mm->config().dark_mode ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(g_set_auto, BM_SETCHECK,
                      g_mm->config().auto_enable ? BST_CHECKED : BST_UNCHECKED, 0);
         SetFocus(g_set_zomboid);
         return 0;
-    case WM_CTLCOLORSTATIC: {
-        SetBkMode((HDC)wp, TRANSPARENT);
-        SetTextColor((HDC)wp, g_theme.text);
-        return (LRESULT)g_bg_brush;
+    case WM_ERASEBKGND: {
+        RECT r{};
+        GetClientRect(hwnd, &r);
+        FillRect((HDC)wp, &r, g_bg_brush);
+        return 1;
     }
-    case WM_CTLCOLORBTN: {
-        SetBkMode((HDC)wp, TRANSPARENT);
-        SetBkColor((HDC)wp, g_theme.bg);
-        SetTextColor((HDC)wp, g_theme.text);
-        return (LRESULT)g_bg_brush;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(dc, &client, g_bg_brush);
+        SetBkMode(dc, TRANSPARENT);
+
+        HGDIOBJ old = SelectObject(dc, g_font_title);
+        SetTextColor(dc, g_theme.text);
+        RECT heading{24, 12, 620, 44};
+        DrawTextW(dc, L"Settings", -1, &heading,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, g_font_body);
+        SetTextColor(dc, g_theme.muted);
+        RECT subtitle{24, 44, 630, 64};
+        DrawTextW(dc, L"Choose the Zomboid folder and configure steamcmd.", -1,
+                  &subtitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        RECT panel{kSetPanelX, kSetPanelY, kSetPanelX + kSetPanelW,
+                   kSetPanelY + kSetPanelH};
+        FillRect(dc, &panel, g_card_brush);
+        FrameRect(dc, &panel, g_border_brush);
+
+        auto label = [&](int y, const wchar_t* text, const wchar_t* hint,
+                         int hint_x) {
+            SelectObject(dc, g_font_body);
+            SetTextColor(dc, g_theme.text);
+            RECT r{kSetFieldX, y, kSetFieldX + 320, y + 20};
+            DrawTextW(dc, text, -1, &r,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            if (!hint) return;
+            SelectObject(dc, g_font_small);
+            SetTextColor(dc, g_theme.muted);
+            RECT h{kSetFieldX + hint_x, y, kSetFieldX + kSetFieldW, y + 20};
+            DrawTextW(dc, hint, -1, &h,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                          DT_NOPREFIX);
+        };
+        label(92, L"Zomboid folder",
+              L"Absolute path containing mods/ and pzmodmgr/", 150);
+        label(166, L"steamcmd executable", L"Blank uses the built-in copy", 210);
+        label(240, L"Steam username", nullptr, 0);
+
+        for (HWND edit : {g_set_zomboid, g_set_path, g_set_user}) {
+            if (!edit) continue;
+            RECT r{};
+            GetWindowRect(edit, &r);
+            MapWindowPoints(nullptr, hwnd, reinterpret_cast<POINT*>(&r), 2);
+            draw_field_frame(dc, r, GetFocus() == edit);
+        }
+
+        SelectObject(dc, g_font_small);
+        SetTextColor(dc, g_theme.muted);
+        RECT note{kSetFieldX, 336, kSetFieldX + kSetFieldW, 354};
+        DrawTextW(dc,
+                  L"No password is stored. Run steamcmd manually once so its "
+                  L"login is cached.",
+                  -1, &note, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        RECT note2{kSetFieldX, 354, kSetFieldX + kSetFieldW, 372};
+        DrawTextW(dc, L"Use anonymous for public Workshop items.", -1, &note2,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        SelectObject(dc, old);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+        if (wp == ID_SET_AUTO) {
+            RECT r = dis->rcItem;
+            FillRect(dis->hDC, &r, g_card_brush);
+            const bool checked =
+                SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            draw_checkbox(dis->hDC, r.left, r.top + (r.bottom - r.top - 18) / 2,
+                          checked);
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, g_theme.text);
+            HGDIOBJ old_font = SelectObject(dis->hDC, g_font_body);
+            wchar_t label[128]{};
+            GetWindowTextW(dis->hwndItem, label, 127);
+            RECT text{r.left + 28, r.top, r.right, r.bottom};
+            DrawTextW(dis->hDC, label, -1, &text,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(dis->hDC, old_font);
+            return TRUE;
+        }
+        if (wp == ID_SET_SAVE || wp == ID_SET_CANCEL || wp == ID_SET_THEME) {
+            draw_dialog_button(dis, wp == ID_SET_SAVE);
+            return TRUE;
+        }
+        return FALSE;
     }
     case WM_CTLCOLOREDIT: {
         SetTextColor((HDC)wp, g_theme.text);
         SetBkColor((HDC)wp, g_theme.field);
         return (LRESULT)g_field_brush;
     }
-    case WM_COMMAND:
-        if (LOWORD(wp) == ID_SET_SAVE) {
+    case WM_COMMAND: {
+        const int id = LOWORD(wp);
+        const int code = HIWORD(wp);
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            RECT r{};
+            GetWindowRect(reinterpret_cast<HWND>(lp), &r);
+            MapWindowPoints(nullptr, hwnd, reinterpret_cast<POINT*>(&r), 2);
+            InflateRect(&r, 2, 2);
+            InvalidateRect(hwnd, &r, FALSE);
+            return 0;
+        }
+        if (id == ID_SET_AUTO && code == BN_CLICKED) {
+            // Owner-draw buttons do not toggle themselves.
+            const bool checked =
+                SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) != BST_CHECKED;
+            SendMessageW(g_set_auto, BM_SETCHECK,
+                         checked ? BST_CHECKED : BST_UNCHECKED, 0);
+            InvalidateRect(g_set_auto, nullptr, TRUE);
+            return 0;
+        }
+        if (id == ID_SET_THEME && code == BN_CLICKED) {
+            // Preview only, like the X11 Theme button; Save persists it.
+            g_settings_dark = !g_settings_dark;
+            refresh_theme(g_hwnd, g_settings_dark);
+            apply_dark_title_bar(hwnd, g_settings_dark);
+            for (HWND edit : {g_set_zomboid, g_set_path, g_set_user})
+                apply_dark_control_theme(edit, g_settings_dark);
+            SetWindowTextW(GetDlgItem(hwnd, ID_SET_THEME),
+                           g_settings_dark ? L"Theme: Dark" : L"Theme: Light");
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            return 0;
+        }
+        if (id == ID_SET_SAVE) {
             std::string zomboid = read_edit(g_set_zomboid);
             std::string path = read_edit(g_set_path);
             std::string user = read_edit(g_set_user);
@@ -1126,8 +1749,6 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             MB_OK | MB_ICONWARNING);
                 return 0;
             }
-            const bool dark =
-                SendMessageW(g_set_dark, BM_GETCHECK, 0, 0) == BST_CHECKED;
             const bool auto_enable =
                 SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) == BST_CHECKED;
             auto log = [](const std::string& s) { append_log(s); };
@@ -1135,12 +1756,12 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             auto r2 = run_command(*g_mm, "config steam_user " + user, log);
             auto r3 = run_command(*g_mm, "config zomboid_dir " + zomboid, log);
             auto r4 = run_command(*g_mm, std::string("config dark_mode ") +
-                                       (dark ? "on" : "off"), log);
+                                       (g_settings_dark ? "on" : "off"), log);
             auto r5 = run_command(*g_mm, std::string("config auto_enable ") +
                                        (auto_enable ? "on" : "off"), log);
             if (r1.ok && r2.ok && r3.ok && r4.ok && r5.ok) {
                 DestroyWindow(hwnd);
-                apply_theme(g_mm->config().dark_mode, g_hwnd);
+                refresh_theme(g_hwnd, g_mm->config().dark_mode);
                 start_watcher(g_mm->config().data_dir);
                 g_mm->reload_installed();
                 clear_icons();
@@ -1155,18 +1776,25 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        if (LOWORD(wp) == ID_SET_CANCEL) {
+        if (id == ID_SET_CANCEL) {
+            if (g_settings_dark != g_mm->config().dark_mode)
+                refresh_theme(g_hwnd, g_mm->config().dark_mode);
             DestroyWindow(hwnd);
             return 0;
         }
         return 0;
+    }
     case WM_CLOSE:
+        if (g_settings_dark != g_mm->config().dark_mode)
+            refresh_theme(g_hwnd, g_mm->config().dark_mode);
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
         g_settings_wnd = nullptr;
-        g_set_dark = nullptr;
         g_set_auto = nullptr;
+        g_set_zomboid = nullptr;
+        g_set_path = nullptr;
+        g_set_user = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1181,20 +1809,28 @@ void show_settings(HWND owner) {
     wc.hInstance = hi;
     wc.lpszClassName = L"PZSettingsWnd";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_bg_brush;
+    // No class brush: WM_ERASEBKGND uses the current palette, so switching the
+    // theme while the dialog is open cannot leave a deleted brush behind.
+    wc.hbrBackground = nullptr;
     RegisterClassW(&wc);
 
+    const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+    RECT wr{0, 0, kSetClientW, kSetClientH};
+    AdjustWindowRect(&wr, style, FALSE);
+    const int w = wr.right - wr.left;
+    const int h = wr.bottom - wr.top;
     RECT r{};
     GetWindowRect(owner, &r);
-    const int w = 620, h = 370;
     const int x = r.left + ((r.right - r.left) - w) / 2;
     const int y = r.top + ((r.bottom - r.top) - h) / 2;
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"PZSettingsWnd", L"Settings",
-        WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, owner, nullptr, hi, nullptr);
+    HWND dlg = CreateWindowExW(0, L"PZSettingsWnd", L"Settings",
+        style, x, y, w, h, owner, nullptr, hi, nullptr);
     if (!dlg) return;
 
     EnableWindow(owner, FALSE);
     ShowWindow(dlg, SW_SHOW);
+    // After the first show, so DWM picks the attribute up on the new frame.
+    apply_dark_title_bar(dlg, g_dark_mode);
 
     MSG msg;
     while (g_settings_wnd && GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -1219,6 +1855,60 @@ std::string target_state(const ActivationTarget& target) {
            std::to_string(g_target_mod_ids.size()) + " on";
 }
 
+void draw_target_item(const DRAWITEMSTRUCT* dis) {
+    if (!dis || dis->itemID == (UINT)-1) return;
+    const std::size_t index = dis->itemID;
+    if (index >= g_targets.size()) return;
+    const auto& target = g_targets[index];
+
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    RECT row = dis->rcItem;
+    FillRect(dis->hDC, &row, selected ? g_selected_brush : g_card_brush);
+    FrameRect(dis->hDC, &row, selected ? g_accent_brush : g_border_brush);
+
+    RECT icon_rc{row.left + 8, row.top + 6, row.left + 44, row.top + 42};
+    HBITMAP bitmap = target_icon_bitmap(target);
+    if (bitmap) {
+        HDC memory = CreateCompatibleDC(dis->hDC);
+        HGDIOBJ old = SelectObject(memory, bitmap);
+        BitBlt(dis->hDC, icon_rc.left, icon_rc.top, 36, 36, memory, 0, 0, SRCCOPY);
+        SelectObject(memory, old);
+        DeleteDC(memory);
+    } else {
+        HBRUSH soft = CreateSolidBrush(g_theme.accent_soft);
+        FillRect(dis->hDC, &icon_rc, soft);
+        DeleteObject(soft);
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, g_theme.accent);
+        HGDIOBJ old = SelectObject(dis->hDC, g_font_small);
+        const wchar_t* badge = target.kind == ActivationKind::Default ? L"DEF"
+            : target.kind == ActivationKind::Save ? L"SAV" : L"SRV";
+        DrawTextW(dis->hDC, badge, -1, &icon_rc,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dis->hDC, old);
+    }
+
+    const std::string state_text = target_state(target);
+    const std::wstring state = to_w(state_text);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    HGDIOBJ old_font = SelectObject(dis->hDC, g_font_small);
+    SIZE state_size{};
+    GetTextExtentPoint32W(dis->hDC, state.c_str(), (int)state.size(), &state_size);
+    const int state_right = row.right - 12;
+    RECT state_rc{state_right - state_size.cx, row.top, state_right, row.bottom};
+    SelectObject(dis->hDC, g_font_body);
+    RECT label_rc{icon_rc.right + 10, row.top, state_rc.left - 12, row.bottom};
+    SetTextColor(dis->hDC, g_theme.text);
+    DrawTextW(dis->hDC, to_w(target.label).c_str(), -1, &label_rc,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dis->hDC, g_font_small);
+    SetTextColor(dis->hDC, (state_text == "off" || state_text == "no Mod IDs")
+                                ? g_theme.muted : g_theme.success);
+    DrawTextW(dis->hDC, state.c_str(), -1, &state_rc,
+              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dis->hDC, old_font);
+}
+
 void update_target_copy_label() {
     if (!g_tgt_copy) return;
     const int sel = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
@@ -1238,15 +1928,25 @@ void fill_target_list() {
         SendMessageW(g_tgt_list, LB_SETCURSEL,
                      keep >= 0 && keep < (int)g_targets.size() ? keep : 0, 0);
     if (g_tgt_status) {
-        const std::string text = g_targets.empty()
-            ? "No mods/default.txt, save, or server was found."
-            : "Enable or disable " +
-              std::to_string(g_selected_ids.size() + g_selected_folders.size()) +
-              " selected mod(s) in the highlighted target. Copy server IDs gives a "
-              "paste-ready list for Add on another pzmodmgr.";
+        const auto names = selected_row_names();
+        std::string text;
+        if (g_targets.empty()) {
+            text = "No mods/default.txt, save, or server was found.";
+        } else if (names.empty()) {
+            text = "Choose a target. Copy server IDs gives a paste-ready list for "
+                   "Add on another pzmodmgr.";
+        } else {
+            text = "Selected: ";
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                if (i != 0) text += ", ";
+                text += to_u8(names[i]);
+            }
+            text += ". Enable or disable them in the highlighted target.";
+        }
         SetWindowTextW(g_tgt_status, to_w(text).c_str());
     }
     update_target_copy_label();
+    sync_bars();
     if (g_targets_wnd) {
         const int selection = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
         EnableWindow(GetDlgItem(g_targets_wnd, ID_TGT_ENABLE), !g_target_mod_ids.empty());
@@ -1270,48 +1970,118 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
         g_targets_wnd = hwnd;
+        apply_dark_title_bar(hwnd, g_dark_mode);
         {
-            HWND label = CreateWindowW(L"STATIC",
-                L"Enable or disable the selected mods in:",
-                WS_CHILD | WS_VISIBLE, 24, 18, 540, 20, hwnd, nullptr, nullptr, nullptr);
-            set_font(label, g_font_body);
             g_tgt_list = CreateWindowW(L"LISTBOX", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY |
-                    WS_TABSTOP,
-                24, 44, 540, 250, hwnd, (HMENU)ID_TGT_LIST, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE | LBS_NOTIFY | LBS_OWNERDRAWFIXED |
+                    LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT | WS_TABSTOP,
+                kTgtListX, kTgtListY, kTgtListW, kTgtListH, hwnd,
+                (HMENU)ID_TGT_LIST, nullptr, nullptr);
             set_font(g_tgt_list, g_font_body);
+            SendMessageW(g_tgt_list, LB_SETITEMHEIGHT, 0, kTgtRowH);
+            g_tgt_list_old_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+                g_tgt_list, GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(TargetsListProc)));
+            create_scrollbar(hwnd, g_tgt_list, false, true, kTgtBarX, kTgtListY,
+                             kScrollWinW, kTgtListH);
+
             g_tgt_status = CreateWindowW(L"STATIC", L"",
-                WS_CHILD | WS_VISIBLE, 24, 304, 540, 34, hwnd, nullptr, nullptr,
-                nullptr);
+                WS_CHILD | WS_VISIBLE | SS_NOPREFIX, kTgtListX, kTgtStatusY,
+                kTgtListW, 32, hwnd, nullptr, nullptr, nullptr);
             set_font(g_tgt_status, g_font_small);
-            HWND enable = CreateWindowW(L"BUTTON", L"Enable",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 24, 348, 100, 30, hwnd,
-                (HMENU)ID_TGT_ENABLE, nullptr, nullptr);
-            set_font(enable, g_font_body);
-            HWND disable = CreateWindowW(L"BUTTON", L"Disable",
-                WS_CHILD | WS_VISIBLE, 132, 348, 100, 30, hwnd,
-                (HMENU)ID_TGT_DISABLE, nullptr, nullptr);
-            set_font(disable, g_font_body);
-            g_tgt_copy = CreateWindowW(L"BUTTON", L"Copy IDs",
-                WS_CHILD | WS_VISIBLE, 240, 348, 100, 30, hwnd,
-                (HMENU)ID_TGT_COPY, nullptr, nullptr);
-            set_font(g_tgt_copy, g_font_body);
-            g_tgt_copy_names = CreateWindowW(L"BUTTON", L"Copy names",
-                WS_CHILD | WS_VISIBLE, 348, 348, 100, 30, hwnd,
-                (HMENU)ID_TGT_COPY_NAMES, nullptr, nullptr);
-            set_font(g_tgt_copy_names, g_font_body);
-            HWND close = CreateWindowW(L"BUTTON", L"Close",
-                WS_CHILD | WS_VISIBLE, 456, 348, 110, 30, hwnd,
-                (HMENU)ID_TGT_CLOSE, nullptr, nullptr);
-            set_font(close, g_font_body);
+
+            struct DialogButton {
+                const wchar_t* label;
+                int id;
+                int x;
+                int w;
+            };
+            const DialogButton buttons[] = {
+                {L"Enable", ID_TGT_ENABLE, 56, 98},
+                {L"Disable", ID_TGT_DISABLE, 160, 98},
+                {L"Copy IDs", ID_TGT_COPY, 264, 118},
+                {L"Copy names", ID_TGT_COPY_NAMES, 390, 98},
+                {L"Close", ID_TGT_CLOSE, 496, 98},
+            };
+            for (const auto& spec : buttons) {
+                HWND button = CreateWindowW(L"BUTTON", spec.label,
+                    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, spec.x, kTgtButtonsY,
+                    spec.w, kTgtButtonH, hwnd, (HMENU)(INT_PTR)spec.id, nullptr,
+                    nullptr);
+                set_font(button, g_font_body);
+                if (spec.id == ID_TGT_COPY) g_tgt_copy = button;
+                if (spec.id == ID_TGT_COPY_NAMES) g_tgt_copy_names = button;
+            }
         }
         fill_target_list();
         SetFocus(g_tgt_list);
         return 0;
+    case WM_ERASEBKGND: {
+        RECT r{};
+        GetClientRect(hwnd, &r);
+        FillRect((HDC)wp, &r, g_bg_brush);
+        return 1;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(dc, &client, g_bg_brush);
+        SetBkMode(dc, TRANSPARENT);
+
+        HGDIOBJ old = SelectObject(dc, g_font_title);
+        SetTextColor(dc, g_theme.text);
+        RECT heading{24, 12, 620, 44};
+        DrawTextW(dc, L"Enable mods", -1, &heading,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, g_font_body);
+        SetTextColor(dc, g_theme.muted);
+        RECT subtitle{24, 44, 630, 64};
+        DrawTextW(dc,
+                  L"Choose a Mods list, save, or server for the selected mods.",
+                  -1, &subtitle,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        RECT panel{kSetPanelX, kSetPanelY, kSetPanelX + kSetPanelW,
+                   kSetPanelY + kSetPanelH};
+        FillRect(dc, &panel, g_card_brush);
+        FrameRect(dc, &panel, g_border_brush);
+
+        // The list has no border of its own, so the frame is painted here and
+        // follows the palette.
+        RECT list{kTgtListX - 1, kTgtListY - 1, kTgtListX + kTgtListW + 1,
+                  kTgtListY + kTgtListH + 1};
+        FrameRect(dc, &list, g_border_brush);
+
+        SelectObject(dc, old);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_CTLCOLORLISTBOX: {
+        SetBkMode((HDC)wp, OPAQUE);
+        SetBkColor((HDC)wp, g_theme.surface);
+        SetTextColor((HDC)wp, g_theme.text);
+        return (LRESULT)g_card_brush;
+    }
     case WM_CTLCOLORSTATIC: {
-        SetBkMode((HDC)wp, TRANSPARENT);
+        SetBkMode((HDC)wp, OPAQUE);
+        SetBkColor((HDC)wp, g_theme.surface);
         SetTextColor((HDC)wp, g_theme.muted);
-        return (LRESULT)g_bg_brush;
+        return (LRESULT)g_card_brush;
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+        if (wp == ID_TGT_LIST) {
+            draw_target_item(dis);
+            return TRUE;
+        }
+        if (wp == ID_TGT_ENABLE || wp == ID_TGT_DISABLE || wp == ID_TGT_COPY ||
+            wp == ID_TGT_COPY_NAMES || wp == ID_TGT_CLOSE) {
+            draw_dialog_button(dis, wp == ID_TGT_ENABLE);
+            return TRUE;
+        }
+        return FALSE;
     }
     case WM_COMMAND: {
         const int id = LOWORD(wp);
@@ -1376,6 +2146,7 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        clear_target_icons();
         g_targets_wnd = nullptr;
         g_tgt_list = nullptr;
         g_tgt_status = nullptr;
@@ -1423,21 +2194,26 @@ void show_targets(HWND owner, bool prefer_server = false, bool allow_empty = fal
     wc.hInstance = hi;
     wc.lpszClassName = L"PZTargetsWnd";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_bg_brush;
+    // Null class brush: the dialog erases itself from the live palette.
+    wc.hbrBackground = nullptr;
     RegisterClassW(&wc);
 
+    const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+    RECT wr{0, 0, kSetClientW, kSetClientH};
+    AdjustWindowRect(&wr, style, FALSE);
+    const int w = wr.right - wr.left;
+    const int h = wr.bottom - wr.top;
     RECT r{};
     GetWindowRect(owner, &r);
-    const int w = 600, h = 430;
     const int x = r.left + ((r.right - r.left) - w) / 2;
     const int y = r.top + ((r.bottom - r.top) - h) / 2;
-    HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"PZTargetsWnd",
-        L"Enable mods", WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, owner,
-        nullptr, hi, nullptr);
+    HWND dlg = CreateWindowExW(0, L"PZTargetsWnd",
+        L"Enable mods", style, x, y, w, h, owner, nullptr, hi, nullptr);
     if (!dlg) return;
 
     EnableWindow(owner, FALSE);
     ShowWindow(dlg, SW_SHOW);
+    apply_dark_title_bar(dlg, g_dark_mode);
 
     MSG msg;
     while (g_targets_wnd && GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -1465,10 +2241,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_brand_line = CreateWindowW(L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE, 32, 49, 20, 3, hwnd, nullptr, nullptr, nullptr);
             g_title = CreateWindowW(L"STATIC", L"PZ Mod Manager",
-                WS_CHILD | WS_VISIBLE, 72, 18, 600, 28, hwnd, nullptr, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE, 72, 12, 600, 38, hwnd, nullptr, nullptr, nullptr);
             set_font(g_title, g_font_title);
             g_subtitle = CreateWindowW(L"STATIC", L"Project Zomboid Workshop installer",
-                WS_CHILD | WS_VISIBLE, 72, 46, 600, 18, hwnd, nullptr, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE, 72, 51, 600, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(g_subtitle, g_font_small);
             g_share_server_btn = CreateWindowW(L"BUTTON", L"Share server",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 560, 24, 116, 30,
@@ -1478,6 +2254,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 688, 24, 100, 30,
                 hwnd, (HMENU)ID_ENABLE, nullptr, nullptr);
             set_font(g_enable_btn, g_font_body);
+            g_self_update = CreateWindowW(L"BUTTON", L"Update app",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 440, 24, 108, 30, hwnd,
+                (HMENU)ID_SELF_UPDATE, nullptr, nullptr);
+            set_font(g_self_update, g_font_body);
             g_settings_btn = CreateWindowW(L"BUTTON", L"Settings",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 800, 24, 96, 30, hwnd,
                 (HMENU)ID_SETTINGS, nullptr, nullptr);
@@ -1523,16 +2303,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             set_font(g_count, g_font_small);
 
             g_list = CreateWindowW(L"LISTBOX", L"",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPSIBLINGS | LBS_NOTIFY |
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | LBS_NOTIFY |
                     LBS_EXTENDEDSEL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
                     LBS_NOINTEGRALHEIGHT | WS_TABSTOP,
-                24, 192, 872, 344, hwnd, (HMENU)ID_LIST, nullptr, nullptr);
+                24, 192, 856, 344, hwnd, (HMENU)ID_LIST, nullptr, nullptr);
             g_list_old_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
                 g_list, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ListProc)));
             SendMessageW(g_list, LB_SETITEMHEIGHT, 0, 68);
+            create_scrollbar(hwnd, g_list, false, false, 882, 192, kScrollWinW, 344);
             g_empty = CreateWindowW(L"STATIC", L"",
                 WS_CHILD | WS_CLIPSIBLINGS | SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
-                24, 192, 872, 68, hwnd, nullptr, nullptr, nullptr);
+                24, 192, 856, 68, hwnd, nullptr, nullptr, nullptr);
             set_font(g_empty, g_font_body);
 
             g_select_all = CreateWindowW(L"BUTTON", L"Select all",
@@ -1557,17 +2338,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 set_font(b, g_font_body);
 
             g_details = CreateWindowW(L"STATIC", L"No selection",
-                WS_CHILD | WS_VISIBLE, 276, 562, 220, 18, hwnd, nullptr, nullptr,
-                nullptr);
+                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS | SS_NOPREFIX,
+                24, 594, 872, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(g_details, g_font_small);
             g_activity_label = CreateWindowW(L"STATIC", L"ACTIVITY",
-                WS_CHILD | WS_VISIBLE, 24, 602, 200, 18, hwnd, nullptr, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE, 24, 616, 200, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(g_activity_label, g_font_small);
+            // No word wrap: EM_GETLINECOUNT then matches what the scrollbar
+            // maps, which keeps the thumb honest on long steamcmd lines.
             g_log = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY |
-                    ES_AUTOVSCROLL | WS_BORDER,
-                24, 622, 872, 62, hwnd, (HMENU)ID_LOG, nullptr, nullptr);
+                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
+                    ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                25, 635, 856, 60, hwnd, (HMENU)ID_LOG, nullptr, nullptr);
             set_font(g_log, g_font_small);
+            g_log_old_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+                g_log, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(LogProc)));
+            create_scrollbar(hwnd, g_log, true, true, 882, 635, kScrollWinW, 60);
             g_status = CreateWindowW(L"STATIC", L"Ready",
                 WS_CHILD | WS_VISIBLE, 24, 702, 500, 18, hwnd, nullptr, nullptr,
                 nullptr);
@@ -1583,6 +2369,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         GetClientRect(hwnd, &r);
         FillRect((HDC)wp, &r, g_bg_brush);
         return 1;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(dc, &client, g_bg_brush);
+        // Card behind the activity log; the label and the edit sit on top of
+        // it, so only the frame and the padding show.
+        RECT card{24, 610, 896, 698};
+        FillRect(dc, &card, g_card_brush);
+        FrameRect(dc, &card, g_border_brush);
+        EndPaint(hwnd, &ps);
+        return 0;
     }
     case WM_CTLCOLORBTN: {
         SetBkMode((HDC)wp, TRANSPARENT);
@@ -1615,7 +2415,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return (LRESULT)g_card_brush;
         }
         if ((HWND)lp == g_activity_label) {
+            SetBkMode((HDC)wp, OPAQUE);
+            SetBkColor((HDC)wp, g_theme.surface);
             SetTextColor((HDC)wp, g_theme.brand);
+            return (LRESULT)g_card_brush;
+        } else if ((HWND)lp == g_details) {
+            SetTextColor((HDC)wp, g_theme.muted);
         } else if ((HWND)lp == g_status) {
             SetTextColor((HDC)wp, g_busy ? g_theme.accent
                                          : (g_dependency_warning.empty()
@@ -1646,7 +2451,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             wp == ID_UPDATE_ALL || wp == ID_SELECT_ALL || wp == ID_CLEAR ||
             wp == ID_COPY || wp == ID_SETTINGS || wp == ID_ENABLE ||
             wp == ID_SHARE_SERVER || wp == ID_FILTER_ALL ||
-            wp == ID_FILTER_UPDATES || wp == ID_SORT || wp == ID_CHECK) {
+            wp == ID_FILTER_UPDATES || wp == ID_SORT || wp == ID_CHECK ||
+            wp == ID_SELF_UPDATE) {
             draw_flat_button(dis, (int)wp, wp == ID_ADD);
             return TRUE;
         }
@@ -1707,6 +2513,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case ID_CHECK:
             start_command("check");
+            return 0;
+        case ID_SELF_UPDATE:
+            start_command("self-update");
             return 0;
         case ID_LIST:
             if (HIWORD(wp) == LBN_SELCHANGE) sync_selection();
@@ -1793,11 +2602,12 @@ int run_ui(ModManager& mm) {
     clear_icons();
 
     SetProcessDPIAware();
-    g_font_title = make_font(18, FW_SEMIBOLD);
+    g_font_title = make_font(15, FW_SEMIBOLD);
+    g_font_row = make_font(10, FW_SEMIBOLD);
     g_font_brand = make_font(12, FW_BOLD);
     g_font_body = make_font(10, FW_NORMAL);
     g_font_small = make_font(8, FW_NORMAL);
-    apply_theme(mm.config().dark_mode, nullptr);
+    refresh_theme(nullptr, mm.config().dark_mode);
 
     HINSTANCE hi = GetModuleHandleW(nullptr);
     WNDCLASSW wc{};
@@ -1805,8 +2615,10 @@ int run_ui(ModManager& mm) {
     wc.hInstance = hi;
     wc.lpszClassName = L"PZModMgrWnd";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_bg_brush;
+    // Null class brush; WM_ERASEBKGND paints the current palette.
+    wc.hbrBackground = nullptr;
     RegisterClassW(&wc);
+    register_scrollbar_class();
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX |
                         WS_CLIPCHILDREN;
@@ -1816,6 +2628,7 @@ int run_ui(ModManager& mm) {
                              CW_USEDEFAULT, CW_USEDEFAULT, wr.right - wr.left,
                              wr.bottom - wr.top, nullptr, nullptr, hi, nullptr);
     if (!w) return 1;
+    apply_dark_title_bar(w, g_dark_mode);
     ShowWindow(w, SW_SHOW);
     start_watcher(mm.config().data_dir);
     // Close the gap between the initial load and the watch starting.
@@ -1845,11 +2658,12 @@ int run_ui(ModManager& mm) {
 
     stop_watcher();
     clear_icons();
+    clear_target_icons();
     g_edit_placeholders.clear();
     g_settings_wnd = nullptr;
-    g_set_dark = nullptr;        for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input, g_add,
+    for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input, g_add,
                    g_list, g_empty, g_log, g_update, g_remove, g_update_all, g_settings_btn,
-                   g_select_all, g_clear, g_copy, g_details, g_status, g_count,
+                   g_self_update, g_select_all, g_clear, g_copy, g_details, g_status, g_count,
                    g_activity_label}) {
         (void)b;
     }
@@ -1857,6 +2671,7 @@ int run_ui(ModManager& mm) {
     DeleteObject(g_font_small);
     DeleteObject(g_font_body);
     DeleteObject(g_font_brand);
+    DeleteObject(g_font_row);
     DeleteObject(g_font_title);
     return (int)m.wParam;
 }
