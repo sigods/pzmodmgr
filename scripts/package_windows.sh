@@ -18,7 +18,12 @@ STAGE="$OUT/$NAME"
 WORK="$BUILD/packaging"
 PAYLOAD="$WORK/payload"
 
-for tool in cmake x86_64-w64-mingw32-g++ x86_64-w64-mingw32-windres zip; do
+WIN_CXX=x86_64-w64-mingw32-g++-posix
+if ! command -v "$WIN_CXX" >/dev/null 2>&1; then
+    WIN_CXX=x86_64-w64-mingw32-g++
+fi
+
+for tool in cmake "$WIN_CXX" x86_64-w64-mingw32-windres zip; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "error: $tool is required (install MinGW-w64, cmake and zip)" >&2
         exit 1
@@ -80,7 +85,7 @@ rm -f "$OUT/$NAME.zip"
 echo "==> building small uninstaller"
 x86_64-w64-mingw32-windres -I "$ROOT/installer" \
     "$ROOT/installer/uninstaller.rc" -O coff -o "$WORK/uninstaller-res.o"
-x86_64-w64-mingw32-g++ -std=c++17 -Os -municode -mwindows \
+"$WIN_CXX" -std=c++17 -Os -municode -mwindows \
     -static -static-libgcc -static-libstdc++ -fno-exceptions -fno-rtti \
     -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
     "$ROOT/installer/uninstaller.cpp" "$WORK/uninstaller-res.o" \
@@ -118,7 +123,7 @@ x86_64-w64-mingw32-windres -I "$ROOT/installer" \
     "$ROOT/installer/installer.rc" -O coff -o "$WORK/installer-res.o"
 x86_64-w64-mingw32-windres "$WORK/payload.rc" -O coff -o "$WORK/payload-res.o"
 
-x86_64-w64-mingw32-g++ -std=c++17 -O2 -municode -mwindows \
+"$WIN_CXX" -std=c++17 -O2 -municode -mwindows \
     -static -static-libgcc -static-libstdc++ \
     -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
     -DPZ_VERSION="L\"$VERSION\"" \

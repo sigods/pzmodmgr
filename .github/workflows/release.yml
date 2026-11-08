@@ -50,7 +50,7 @@ jobs:
       - name: Install MinGW-w64
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 zip
+          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64-posix zip
 
       - name: Package Windows artifacts
         run: ./scripts/package_windows.sh

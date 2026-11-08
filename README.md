@@ -85,7 +85,10 @@ UPX_BIN=/path/to/upx ./scripts/package_windows.sh   # optional pzmodmgr.exe + se
 
 The setup reuses a registered previous install directory, so a newer setup
 upgrades in place instead of creating a second copy. The Linux installer follows
-the existing `~/.local/bin/pzmodmgr` symlink for the same behavior.
+the existing `~/.local/bin/pzmodmgr` symlink for the same behavior. The Windows
+package script prefers the POSIX-threaded MinGW compiler
+(`x86_64-w64-mingw32-g++-posix`); on Debian/Ubuntu install
+`g++-mingw-w64-x86-64-posix`.
 
 An installed or portable copy can also update itself from the latest GitHub
 release. Use `Update app` in either native UI, or run:
