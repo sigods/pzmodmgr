@@ -115,7 +115,7 @@ Linux distribution (single self-extracting `.sh` with a `.desktop` entry):
 
 ```bash
 ./scripts/package_linux.sh
-./dist/PZModManager-0.2.2-linux-x86_64.sh
+./dist/PZModManager-0.2.3-linux-x86_64.sh
 ```
 
 GCC/Clang Release builds (Linux and the MinGW Windows build) default to size

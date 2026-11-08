@@ -17,12 +17,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "pzmodmgr contributors"
             VALUE "FileDescription", "PZ Mod Manager Uninstaller"
-            VALUE "FileVersion", "0.2.2"
+            VALUE "FileVersion", "0.2.3"
             VALUE "InternalName", "pzmodmgr-uninstall"
             VALUE "LegalCopyright", "Copyright (C) 2026 pzmodmgr contributors. GPL-3.0-only."
             VALUE "OriginalFilename", "uninstall.exe"
             VALUE "ProductName", "PZ Mod Manager"
-            VALUE "ProductVersion", "0.2.2"
+            VALUE "ProductVersion", "0.2.3"
         END
     END
     BLOCK "VarFileInfo"
