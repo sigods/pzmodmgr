@@ -25,6 +25,9 @@ public:
     Result update_one(std::uint64_t workshop_id, const LogFn& log);
     Result update_all(const LogFn& log);
     Result check_updates(const LogFn& log);
+    // Checks the latest GitHub release, records the result, and exposes whether
+    // an app update is available. A failed check keeps the last known state.
+    Result check_app_release(const LogFn& log);
 
     std::vector<InstalledMod> list() const { return db_; }
     // Tracked records plus manual folders in mods/ that installed.tsv does not
@@ -64,8 +67,10 @@ public:
     // not installed. Manual mods count as installed if their mod.info is present.
     std::vector<MissingRequirement> missing_requirements() const;
     bool update_available(std::uint64_t workshop_id) const;
-    // True when mods are installed and no update check ran in the last day.
+    bool app_update_available() const { return app_update_available_; }
+    // True when either an installed mod or the app release is due for a check.
     bool update_check_due() const;
+    bool app_update_check_due() const;
     // Re-reads installed.tsv after another process changed it. Returns true
     // when the visible records or game version changed; keeps live update flags.
     bool reload_installed();
@@ -75,11 +80,17 @@ private:
     std::string game_version_;
     std::vector<InstalledMod> db_;
     std::map<std::uint64_t, bool> updates_;
+    bool app_update_available_ = false;
 
     fs::path db_path() const { return cfg_.data_dir / "installed.tsv"; }
     fs::path last_check_path() const { return cfg_.data_dir / "last_check"; }
+    fs::path last_app_check_path() const { return cfg_.data_dir / "last_app_check"; }
+    fs::path app_update_path() const { return cfg_.data_dir / "app_update"; }
     std::uint64_t read_last_check() const;
+    std::uint64_t read_last_app_check() const;
     void record_update_check() const;
+    void record_app_update_check() const;
+    void load_app_update_state();
     void load_db();
     void save_db() const;
     Result install(std::uint64_t id, std::uint64_t remote_time, const LogFn& log,

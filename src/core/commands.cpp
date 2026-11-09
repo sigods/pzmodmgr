@@ -86,7 +86,12 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         if (missing != 0) msg += ", " + std::to_string(missing) + " not installed";
         return {missing == 0, msg};
     }
-    if (cmd == "check") return mm.check_updates(log);
+    if (cmd == "check") {
+        auto result = mm.check_updates(log);
+        auto app = mm.check_app_release(log);
+        if (app.ok) result.message += " " + app.message;
+        return result;
+    }
     if (cmd == "self-update") return stage_app_update(mm.config(), log);
     if (cmd == "targets") {
         auto targets = mm.activation_targets();

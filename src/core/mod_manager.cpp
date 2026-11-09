@@ -3,6 +3,7 @@
 #include "core/paths.hpp"
 #include "core/steamcmd.hpp"
 #include "core/text.hpp"
+#include "core/updater.hpp"
 #include "core/url.hpp"
 #include <algorithm>
 #include <atomic>
@@ -190,6 +191,7 @@ ModManager::ModManager(Config cfg)
     fs::create_directories(cfg_.data_dir);
     prune_stale_state(cfg_.data_dir);
     load_db();
+    load_app_update_state();
 }
 
 Result ModManager::set_zomboid_dir(const fs::path& dir) {
@@ -223,7 +225,9 @@ Result ModManager::set_zomboid_dir(const fs::path& dir) {
     game_version_ = read_game_version(cfg_.zomboid_dir);
     db_.clear();
     updates_.clear();
+    app_update_available_ = false;
     load_db();
+    load_app_update_state();
     return {true, "Zomboid folder set to " + normalized.string()};
 }
 
@@ -355,18 +359,44 @@ Result ModManager::check_updates(const LogFn& log) {
     return {true, msg};
 }
 
+Result ModManager::check_app_release(const LogFn& log) {
+    const AppUpdate update = pz::check_app_update();
+    // Record the attempt even when the network failed: the UI asks once a day,
+    // not on every launch, so an offline start does not turn into a retry loop.
+    record_app_update_check();
+    if (!update.ok) {
+        log("app update check failed: " + update.message);
+        return {false, update.message};
+    }
+
+    app_update_available_ = update.available;
+    if (!write_text_atomic(app_update_path(), update.latest_version + "\n"))
+        log("warning: could not save the app update state");
+    log(update.message);
+    return {true, update.message};
+}
+
 bool ModManager::update_available(std::uint64_t workshop_id) const {
     auto it = updates_.find(workshop_id);
     return it != updates_.end() && it->second;
 }
 
 bool ModManager::update_check_due() const {
+    if (app_update_check_due()) return true;
     if (db_.empty()) return false;
     const std::uint64_t now = now_seconds();
     const std::uint64_t last = read_last_check();
     if (last == 0) return true;
     // A check timestamp in the future means the clock moved backwards. Do not
     // turn that into a check on every reopen until the clock catches up.
+    if (last > now) return false;
+    return now - last >= kUpdateCheckIntervalSeconds;
+}
+
+bool ModManager::app_update_check_due() const {
+    const std::uint64_t now = now_seconds();
+    const std::uint64_t last = read_last_app_check();
+    if (last == 0) return true;
     if (last > now) return false;
     return now - last >= kUpdateCheckIntervalSeconds;
 }
@@ -463,11 +493,12 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         return {false, "No mod.info in workshop item " + std::to_string(id)};
     }
 
-    // A Workshop item can contain several variants. Keep only those whose
-    // versionMin/versionMax includes the installed Project Zomboid build, so
-    // both first installs and updates cannot replace a working mod with one
-    // that does not support this game version.
+    // A Workshop item can contain several variants. Prefer the ones whose
+    // versionMin/versionMax includes the installed Project Zomboid build. Older
+    // builds are still installable: fall back to the downloaded variants and
+    // leave a clear activity message instead of blocking the user.
     std::vector<fs::path> compatible;
+    std::vector<fs::path> incompatible;
     for (const auto& root : roots) {
         auto info = read_mod_info(root, game_version_);
         if (!info) continue;
@@ -475,15 +506,21 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
             compatible.push_back(root);
             continue;
         }
-        const std::string range = version_range(*info);
-        log("skipped " + info->name + " (requires " + range + ", installed " +
-            game_version_ + ")");
+        incompatible.push_back(root);
+        const std::string name = info->name.empty() ? info->id : info->name;
+        const std::string label = name.empty() ? root.filename().string() : name;
+        log("warning: " + label + " targets " + version_range(*info) +
+            ", installed " + game_version_ + "; installing anyway");
     }
     if (compatible.empty()) {
-        cleanup_cache();
-        return {false, "Mod does not support Project Zomboid " + game_version_};
+        if (incompatible.empty()) {
+            cleanup_cache();
+            return {false, "No readable mod.info in workshop item " + std::to_string(id)};
+        }
+        roots.swap(incompatible);
+    } else {
+        roots.swap(compatible);
     }
-    roots.swap(compatible);
 
     struct Moved {
         fs::path source;
@@ -956,6 +993,27 @@ std::uint64_t ModManager::read_last_check() const {
 
 void ModManager::record_update_check() const {
     write_text_atomic(last_check_path(), std::to_string(now_seconds()) + "\n");
+}
+
+std::uint64_t ModManager::read_last_app_check() const {
+    std::uint64_t value = 0;
+    for_each_line(last_app_check_path(), [&](const std::string& line) {
+        if (value == 0) value = std::strtoull(line.c_str(), nullptr, 10);
+    });
+    return value;
+}
+
+void ModManager::record_app_update_check() const {
+    write_text_atomic(last_app_check_path(), std::to_string(now_seconds()) + "\n");
+}
+
+void ModManager::load_app_update_state() {
+    std::string latest;
+    for_each_line(app_update_path(), [&](const std::string& line) {
+        if (!latest.empty()) return;
+        latest = split_first_word(line).first;
+    });
+    if (!latest.empty()) app_update_available_ = app_version_newer(latest, app_version());
 }
 
 void ModManager::load_db() {

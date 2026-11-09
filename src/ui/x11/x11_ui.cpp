@@ -391,6 +391,7 @@ int run_ui(ModManager& mm) {
     std::deque<std::string> log;
     std::string input;
     bool busy = false;
+    bool app_update_available = mm.app_update_available();
 
     enum class PasteField { Input, Filter, SettingsZomboid, SettingsPath, SettingsUser };
     PasteField paste_field = PasteField::Input;
@@ -581,8 +582,8 @@ int run_ui(ModManager& mm) {
         case Btn::Install:
         case Btn::Settings:
         case Btn::ShareServer:
-        case Btn::SelfUpdate:
         case Btn::UpdateAll: return true;
+        case Btn::SelfUpdate: return app_update_available;
         case Btn::Update:
         case Btn::Remove:
         case Btn::Copy: return !selected_ids.empty();
@@ -694,6 +695,11 @@ int run_ui(ModManager& mm) {
             border_color = fill_color;
             text_color = pal.on_accent;
             icon_color = pal.on_accent;
+        } else if (b == Btn::SelfUpdate) {
+            fill_color = hot ? pal.brand : pal.success;
+            border_color = fill_color;
+            text_color = dark_mode ? pal.bg : pal.on_accent;
+            icon_color = text_color;
         } else if (hot) {
             fill_color = pal.hover;
             border_color = pal.brand_border;
@@ -814,15 +820,19 @@ int run_ui(ModManager& mm) {
         list_dirty = false;
     };
 
+    auto filter_clear_rect = []() -> Rect {
+        return {kMargin + 280 - 24, kFilterY + 2, 20, kFilterH - 4};
+    };
+
     auto draw_input = [&](const Rect& r, const std::string& value,
                           const std::string& placeholder, bool focused,
-                          bool enabled) {
+                          bool enabled, int right_pad) {
         fill(dpy, win, gc, r.x, r.y, r.w, r.h, pal.field);
         frame(dpy, win, gc, r.x, r.y, r.w, r.h,
               focused && enabled ? pal.accent : pal.border);
         const bool empty = value.empty();
         const int text_x = r.x + 12;
-        const int inner_w = r.w - 24;
+        const int inner_w = r.w - 24 - right_pad;
         const std::string shown = empty ? elide(body, placeholder, inner_w)
                                         : elide_tail(body, value, inner_w);
         text(dpy, win, gc, body, text_x, baseline_for(body, r), shown,
@@ -907,17 +917,17 @@ int run_ui(ModManager& mm) {
         text(dpy, win, gc, body, x + 150, kSettingsY + 92,
              "Absolute path containing mods/ and pzmodmgr/", pal.muted);
         draw_input({x, kSettingsZomboidY, kSettingsFieldW, kSettingsFieldH},
-                   settings_zomboid, "Default is ~/Zomboid", settings_field == 0, true);
+                   settings_zomboid, "Default is ~/Zomboid", settings_field == 0, true, 0);
 
         text(dpy, win, gc, body, x, kSettingsY + 166, "steamcmd executable", pal.text);
         text(dpy, win, gc, body, x + 210, kSettingsY + 166,
              "Blank uses the built-in copy", pal.muted);
         draw_input({x, kSettingsSteamcmdY, kSettingsFieldW, kSettingsFieldH},
-                   settings_path, "Built-in steamcmd", settings_field == 1, true);
+                   settings_path, "Built-in steamcmd", settings_field == 1, true, 0);
 
         text(dpy, win, gc, body, x, kSettingsY + 240, "Steam username", pal.text);
         draw_input({x, kSettingsUserY, kSettingsFieldW, kSettingsFieldH},
-                   settings_user, "anonymous", settings_field == 2, true);
+                   settings_user, "anonymous", settings_field == 2, true, 0);
         const bool auto_hot = in_rect(last_mouse_x, last_mouse_y, x, kSettingsY + 292,
                                       kSettingsFieldW, 22);
         const Rect auto_box{x, kSettingsY + 292, 18, 18};
@@ -1039,7 +1049,7 @@ int run_ui(ModManager& mm) {
         draw_button(Btn::Settings);
 
         draw_input({kInputX, kInputY, kInputW, kInputH}, input,
-                   "Paste Workshop URLs or IDs", !filter_focus && !busy, !busy);
+                   "Paste Workshop URLs or IDs", !filter_focus && !busy, !busy, 0);
         draw_button(Btn::Install);
         text(dpy, win, gc, body, kMargin, 142,
              "Press Enter to install. Separate several links with spaces; collections are supported.", pal.muted);
@@ -1047,7 +1057,15 @@ int run_ui(ModManager& mm) {
         if (list_dirty && !busy) rebuild_visible();
 
         draw_input({kMargin, kFilterY, 280, kFilterH}, filter_text,
-                   "Filter name or folder", filter_focus && !busy, !busy);
+                   "Filter name or folder", filter_focus && !busy, !busy,
+                   filter_text.empty() ? 0 : 26);
+        if (!filter_text.empty()) {
+            const Rect clear = filter_clear_rect();
+            const bool hot = !busy && in_rect(last_mouse_x, last_mouse_y, clear.x,
+                                              clear.y, clear.w, clear.h);
+            text(dpy, win, gc, body, clear.x + (clear.w - text_width(body, "X")) / 2,
+                 baseline_for(body, clear), "X", hot ? pal.accent : pal.muted);
+        }
         draw_button(Btn::FilterAll);
         draw_button(Btn::FilterUpdates);
         draw_button(Btn::Sort);
@@ -1123,9 +1141,14 @@ int run_ui(ModManager& mm) {
                                         row_enabled[static_cast<std::size_t>(index)] != 0;
                 const auto& mod_ids = row_mod_ids[static_cast<std::size_t>(index)];
                 const std::string on_targets = enabled_in(activation, mod_ids);
-                const int pills = (has_update ? 1 : 0) + (switchable ? 1 : 0);
+                constexpr int pill_w = 64, pill_gap = 6, pill_margin = 12;
+                const int on_x = card.x + card.w - pill_margin - pill_w;
+                const int update_x = switchable ? on_x - pill_gap - pill_w : on_x;
                 const int text_x = card.x + 72;
-                const int text_w = card.w - (pills >= 2 ? 256 : pills == 1 ? 190 : 120);
+                const int text_right = (has_update ? update_x
+                                                  : switchable ? on_x
+                                                               : card.x + card.w - pill_margin) - 8;
+                const int text_w = text_right - text_x;
                 text(dpy, win, gc, heading, text_x, card.y + 26,
                      elide(heading, m.name.empty() ? m.folders.front() : m.name, text_w),
                      pal.text);
@@ -1135,8 +1158,7 @@ int run_ui(ModManager& mm) {
                 text(dpy, win, gc, body, text_x, card.y + 46,
                      elide(body, meta, text_w), pal.muted);
                 if (switchable) {
-                    const int x = card.x + card.w - (has_update ? 190 : 124);
-                    const Rect pill{x, card.y + 22, 64, 20};
+                    const Rect pill{on_x, card.y + 22, pill_w, 20};
                     fill(dpy, win, gc, pill.x, pill.y, pill.w, pill.h,
                          is_enabled ? pal.success : pal.bg);
                     frame(dpy, win, gc, pill.x, pill.y, pill.w, pill.h,
@@ -1148,7 +1170,7 @@ int run_ui(ModManager& mm) {
                          is_enabled ? pal.on_accent : pal.muted);
                 }
                 if (has_update) {
-                    const Rect pill{card.x + card.w - 124, card.y + 22, 64, 20};
+                    const Rect pill{update_x, card.y + 22, pill_w, 20};
                     fill(dpy, win, gc, pill.x, pill.y, pill.w, pill.h, pal.accent);
                     text(dpy, win, gc, body,
                          pill.x + (pill.w - text_width(body, "UPDATE")) / 2,
@@ -1553,7 +1575,7 @@ int run_ui(ModManager& mm) {
     const bool auto_check_due = mm.update_check_due();
     bool auto_check_started = false;
     push("Paste Workshop URLs or IDs, then press Enter.");
-    push("Click a mod to select it; Ctrl/Shift-click for more.");
+    push("Click mods to toggle their selection; Shift-click selects a range.");
     refresh_dependency_warning();
     redraw();
 
@@ -1790,6 +1812,17 @@ int run_ui(ModManager& mm) {
                     redraw();
                     break;
                 }
+                if (!filter_text.empty()) {
+                    const Rect clear = filter_clear_rect();
+                    if (in_rect(x, y, clear.x, clear.y, clear.w, clear.h)) {
+                        filter_text.clear();
+                        list_offset = 0;
+                        list_dirty = true;
+                        filter_focus = true;
+                        redraw();
+                        break;
+                    }
+                }
                 if (in_rect(x, y, kMargin, kFilterY, 280, kFilterH)) {
                     filter_focus = true;
                     redraw();
@@ -1903,10 +1936,6 @@ int run_ui(ModManager& mm) {
                             select_row(row);
                             anchor_index = index;
                         }
-                    } else if (ev.xbutton.state & ControlMask) {
-                        if (row_selected(row)) unselect_row(row);
-                        else select_row(row);
-                        anchor_index = index;
                     } else {
                         // A plain row click toggles that row without replacing
                         // the rest of the selection.
@@ -2119,6 +2148,7 @@ int run_ui(ModManager& mm) {
             if (drain_pending()) {
                 if (worker.joinable()) worker.join();
                 busy = false;
+                app_update_available = mm.app_update_available();
                 if (reload_pending) {
                     reload_pending = false;
                     mm.reload_installed();

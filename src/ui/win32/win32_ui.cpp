@@ -7,6 +7,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <commctrl.h>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -26,7 +27,7 @@ constexpr int ID_UPDATE = 105, ID_REMOVE = 106, ID_UPDATE_ALL = 107, ID_SETTINGS
 constexpr int ID_SELECT_ALL = 109, ID_CLEAR = 110;
 constexpr int ID_FILTER = 111, ID_FILTER_ALL = 112, ID_FILTER_UPDATES = 113;
 constexpr int ID_SORT = 114, ID_CHECK = 115, ID_COPY = 116, ID_ENABLE = 117;
-constexpr int ID_SHARE_SERVER = 118, ID_SELF_UPDATE = 119;
+constexpr int ID_SHARE_SERVER = 118, ID_SELF_UPDATE = 119, ID_FILTER_CLEAR = 120;
 constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_THEME = 203, ID_SET_AUTO = 204;
 constexpr int ID_TGT_LIST = 301, ID_TGT_ENABLE = 302, ID_TGT_DISABLE = 303;
 constexpr int ID_TGT_COPY = 304, ID_TGT_CLOSE = 305, ID_TGT_COPY_NAMES = 306;
@@ -71,6 +72,7 @@ HWND g_brand_line = nullptr;
 HWND g_input = nullptr;
 HWND g_add = nullptr;
 HWND g_filter = nullptr;
+HWND g_filter_clear = nullptr;
 HWND g_filter_all = nullptr;
 HWND g_filter_updates = nullptr;
 HWND g_sort = nullptr;
@@ -151,6 +153,7 @@ std::string g_dependency_warning;
 std::string g_dependency_signature;
 bool g_busy = false;
 bool g_reload_pending = false;
+bool g_app_update_available = false;
 
 struct EditPlaceholder {
     WNDPROC old_proc = nullptr;
@@ -382,6 +385,19 @@ void draw_checkbox(HDC dc, int x, int y, bool checked) {
 
 // Buttons in the modal windows: same flat look as the main toolbar, without
 // the glyphs (the glyph set only covers the main actions).
+void draw_filter_clear(const DRAWITEMSTRUCT* dis) {
+    if (!dis) return;
+    const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    RECT r = dis->rcItem;
+    fill_color(dis->hDC, r, pressed ? g_theme.hover : g_theme.field);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, pressed ? g_theme.accent : g_theme.muted);
+    HGDIOBJ old = SelectObject(dis->hDC, g_font_small);
+    DrawTextW(dis->hDC, L"X", -1, &r,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dis->hDC, old);
+}
+
 void draw_dialog_button(const DRAWITEMSTRUCT* dis, bool primary) {
     if (!dis) return;
     const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
@@ -721,13 +737,21 @@ void refresh_dependency_warning() {
 
 std::string read_edit(HWND edit);
 
+void update_filter_clear() {
+    if (!g_filter || !g_filter_clear) return;
+    const bool has_text = GetWindowTextLengthW(g_filter) > 0;
+    ShowWindow(g_filter_clear, has_text ? SW_SHOW : SW_HIDE);
+    EnableWindow(g_filter_clear, has_text && !g_busy);
+    InvalidateRect(g_filter_clear, nullptr, TRUE);
+}
+
 void update_actions() {
     const bool has_ids = !g_selected_ids.empty();
     const bool has_any = has_ids || !g_selected_folders.empty();
     EnableWindow(g_add, !g_busy);
     EnableWindow(g_update_all, !g_busy);
     EnableWindow(g_settings_btn, !g_busy);
-    EnableWindow(g_self_update, !g_busy);
+    EnableWindow(g_self_update, !g_busy && g_app_update_available);
     EnableWindow(g_share_server_btn, !g_busy);
     EnableWindow(g_select_all, !g_busy && !g_row_ids.empty());
     EnableWindow(g_clear, !g_busy && has_any);
@@ -737,6 +761,7 @@ void update_actions() {
     EnableWindow(g_remove, !g_busy && has_ids);
     EnableWindow(g_filter, !g_busy);
     EnableWindow(g_filter_all, !g_busy);
+    update_filter_clear();
     EnableWindow(g_filter_updates, !g_busy);
     EnableWindow(g_sort, !g_busy);
     EnableWindow(g_check, !g_busy);
@@ -989,11 +1014,9 @@ LRESULT CALLBACK ListProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             RECT item_rc{};
             if (SendMessageW(hwnd, LB_GETITEMRECT, item, (LPARAM)&item_rc) != LB_ERR) {
                 if (msg == WM_LBUTTONDOWN &&
-                    (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
                     (GetKeyState(VK_SHIFT) & 0x8000) == 0) {
-                    // A plain row click toggles that row without replacing the
-                    // rest of the selection. Ctrl/Shift keep their native
-                    // listbox behavior.
+                    // A row click toggles that row without replacing the rest
+                    // of the selection. Shift keeps the native range behavior.
                     const LRESULT selected = SendMessageW(hwnd, LB_GETSEL, item, 0);
                     SendMessageW(hwnd, LB_SETSEL, selected ? FALSE : TRUE, item);
                     SendMessageW(hwnd, LB_SETANCHORINDEX, item, 0);
@@ -1398,6 +1421,11 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
         border_brush = g_accent_brush;
         text_color = g_theme.on_accent;
         icon_color = g_theme.on_accent;
+    } else if (id == ID_SELF_UPDATE) {
+        fill_brush = g_brand_brush;
+        border_brush = g_brand_brush;
+        text_color = g_dark_mode ? g_theme.bg : g_theme.cream;
+        icon_color = text_color;
     } else if (pressed) {
         fill_brush = g_brand_soft_brush;
         border_brush = g_brand_brush;
@@ -1476,8 +1504,12 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     SetBkMode(dis->hDC, TRANSPARENT);
     SetTextColor(dis->hDC, g_theme.text);
     HGDIOBJ old_font = SelectObject(dis->hDC, g_font_row);
-    const int text_right = card.right - (has_update ? (switchable ? 256 : 132)
-                                                   : (switchable ? 198 : 50));
+    constexpr int pill_w = 64, pill_gap = 6, pill_margin = 12;
+    const int on_left = card.right - pill_margin - pill_w;
+    const int update_left = switchable ? on_left - pill_gap - pill_w : on_left;
+    const int text_right = (has_update ? update_left
+                                       : switchable ? on_left
+                                                    : card.right - pill_margin) - 8;
     RECT name_rc{card.left + 72, card.top + 7, text_right, card.top + 34};
     DrawTextW(dis->hDC, g_row_names[index].c_str(), -1, &name_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -1488,8 +1520,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     if (switchable) {
-        RECT pill{card.right - (has_update ? 190 : 124), card.top + 22,
-                  card.right - (has_update ? 126 : 60), card.top + 42};
+        RECT pill{on_left, card.top + 22, on_left + pill_w, card.top + 42};
         HBRUSH fill_brush = CreateSolidBrush(is_enabled ? g_theme.success : g_theme.surface);
         FillRect(dis->hDC, &pill, fill_brush);
         DeleteObject(fill_brush);
@@ -1500,7 +1531,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     }
 
     if (has_update) {
-        RECT pill{card.right - 124, card.top + 22, card.right - 60, card.top + 42};
+        RECT pill{update_left, card.top + 22, update_left + pill_w, card.top + 42};
         HBRUSH orange = CreateSolidBrush(g_theme.accent);
         FillRect(dis->hDC, &pill, orange);
         DeleteObject(orange);
@@ -2262,6 +2293,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 24, 158, 280, 24, hwnd, (HMENU)ID_FILTER, nullptr, nullptr);
             set_font(g_filter, g_font_small);
             set_edit_placeholder(g_filter, L"Filter name or folder");
+            // Keep typed text out from under the inline clear button.
+            SendMessageW(g_filter, EM_SETMARGINS, EC_RIGHTMARGIN,
+                         MAKELPARAM(0, 26));
+            g_filter_clear = CreateWindowW(L"BUTTON", L"X",
+                WS_CHILD | BS_OWNERDRAW, 282, 159, 20, 22, hwnd,
+                (HMENU)ID_FILTER_CLEAR, nullptr, nullptr);
+            set_font(g_filter_clear, g_font_small);
             g_filter_all = CreateWindowW(L"BUTTON", L"All",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 312, 158, 60, 24, hwnd,
                 (HMENU)ID_FILTER_ALL, nullptr, nullptr);
@@ -2338,7 +2376,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 nullptr);
             set_font(g_status, g_font_small);
             append_log("Paste Workshop URLs or IDs, then press Enter.");
-            append_log("Click a mod to select it; Ctrl/Shift-click for more.");
+            append_log("Click mods to toggle their selection; Shift-click selects a range.");
             refresh_dependency_warning();
             refresh_list();
         }
@@ -2426,6 +2464,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             draw_list_item(dis);
             return TRUE;
         }
+        if (wp == ID_FILTER_CLEAR) {
+            draw_filter_clear(dis);
+            return TRUE;
+        }
         if (wp == ID_ADD || wp == ID_UPDATE || wp == ID_REMOVE ||
             wp == ID_UPDATE_ALL || wp == ID_SELECT_ALL || wp == ID_CLEAR ||
             wp == ID_COPY || wp == ID_SETTINGS || wp == ID_ENABLE ||
@@ -2475,8 +2517,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_FILTER:
             if (HIWORD(wp) == EN_CHANGE) {
                 InvalidateRect(g_filter, nullptr, TRUE);
+                update_filter_clear();
                 refresh_list();
             }
+            return 0;
+        case ID_FILTER_CLEAR:
+            SetWindowTextW(g_filter, L"");
+            refresh_list();
+            update_filter_clear();
+            SetFocus(g_filter);
             return 0;
         case ID_FILTER_ALL:
             g_only_updates = false;
@@ -2519,6 +2568,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_worker.joinable()) g_worker.join();
         drain_pending();
         g_busy = false;
+        g_app_update_available = g_mm && g_mm->app_update_available();
         if (g_reload_pending) {
             g_reload_pending = false;
             if (g_mm) g_mm->reload_installed();
@@ -2578,6 +2628,7 @@ int run_ui(ModManager& mm) {
     g_activation.clear();
     g_dependency_warning.clear();
     g_dependency_signature.clear();
+    g_app_update_available = mm.app_update_available();
     clear_icons();
 
     SetProcessDPIAware();
@@ -2642,8 +2693,8 @@ int run_ui(ModManager& mm) {
     g_settings_wnd = nullptr;
     for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input, g_add,
                    g_list, g_empty, g_log, g_update, g_remove, g_update_all, g_settings_btn,
-                   g_self_update, g_select_all, g_clear, g_copy, g_details, g_status, g_count,
-                   g_activity_label}) {
+                   g_self_update, g_filter_clear, g_select_all, g_clear, g_copy, g_details,
+                   g_status, g_count, g_activity_label}) {
         (void)b;
     }
     destroy_theme_brushes();

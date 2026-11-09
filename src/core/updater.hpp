@@ -31,8 +31,8 @@ bool sha256_file(const fs::path& file, std::string& hex, std::string& detail);
 // Fetches the latest GitHub release with curl.
 AppUpdate check_app_update();
 
-// Removes abandoned staged releases and old update folders. An update whose
-// helper is still running is preserved.
+// Removes completed, abandoned, or failed update folders and a leftover helper.
+// An update whose helper is still running is preserved.
 void cleanup_update_cache(const Config& cfg);
 
 // Checks, downloads, verifies and extracts a release, then starts a detached

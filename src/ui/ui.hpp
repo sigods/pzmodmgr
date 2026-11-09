@@ -169,16 +169,7 @@ inline std::string mod_meta(const ModRow& mod, const ModInfo* info,
         if (!meta.empty()) meta += "  |  ";
         meta += value;
     };
-    if (mod.folders.size() == 1) {
-        add(mod.folders.front());
-    } else if (!mod.folders.empty()) {
-        std::string folders = std::to_string(mod.folders.size()) + " folders: ";
-        for (std::size_t i = 0; i < mod.folders.size(); ++i) {
-            if (i != 0) folders += ", ";
-            folders += mod.folders[i];
-        }
-        add(folders);
-    }
+    if (mod.folders.size() == 1) add(mod.folders.front());
     if (!enabled_in_targets.empty()) add("On: " + enabled_in_targets);
     const std::string updated = format_update_date(mod.time_updated);
     if (!updated.empty()) add("Updated " + updated);

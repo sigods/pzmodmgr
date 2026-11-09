@@ -69,6 +69,9 @@ EOF
     if [ -n "${FAKE_STEAMCMD_VERSION_MIN:-}" ]; then
         printf 'versionMin=%s\n' "$FAKE_STEAMCMD_VERSION_MIN" >> "$content/mods/$m/mod.info"
     fi
+    if [ -n "${FAKE_STEAMCMD_VERSION_MAX:-}" ]; then
+        printf 'versionMax=%s\n' "$FAKE_STEAMCMD_VERSION_MAX" >> "$content/mods/$m/mod.info"
+    fi
 done
 
 echo "Success. Downloaded item $item to \"$content\" (0 bytes)"

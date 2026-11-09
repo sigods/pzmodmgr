@@ -518,7 +518,10 @@ Result stage_app_update(const Config& cfg, const LogFn& log) {
         return {false, "The update archive does not contain " + exe_name};
     }
 
-    const fs::path helper_dir = base / "helper";
+    // Keep the helper outside the updates folder so a successful update can
+    // remove every staged byte without leaving its running executable behind.
+    const fs::path helper_dir = cfg.data_dir / "update_helper";
+    fs::remove_all(helper_dir, ec);
     fs::create_directories(helper_dir, ec);
     if (ec) {
         fs::remove_all(base, ec);
@@ -564,28 +567,30 @@ Result stage_app_update(const Config& cfg, const LogFn& log) {
 }
 
 void cleanup_update_cache(const Config& cfg) {
-    const fs::path updates_root = cfg.data_dir / "updates";
+    // The detached helper lives next to updates, not inside it, so cleanup can
+    // remove completed releases completely. A running helper on Windows may
+    // keep this folder for one more launch; it never keeps an update package.
     std::error_code ec;
+    fs::remove_all(cfg.data_dir / "update_helper", ec);
+    ec.clear();
+
+    const fs::path updates_root = cfg.data_dir / "updates";
     fs::directory_iterator entries(updates_root, ec);
     if (ec) return;
 
-    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(24 * 7);
     for (const auto& entry : entries) {
         std::error_code item_ec;
         if (!entry.is_directory(item_ec)) continue;
 
-        // A pending marker without a live helper is an abandoned stage: it can
-        // never be applied, so do not keep its potentially large download.
+        // A live pending marker protects the one update the helper is waiting
+        // to apply. Everything else is a completed, abandoned, or failed stage
+        // and should not leave a package behind.
         const fs::path marker = entry.path() / "pending.txt";
         if (fs::is_regular_file(marker, item_ec)) {
             const unsigned long pid = marker_pid(marker);
             if (pid != 0 && process_is_running(pid)) continue;
-            fs::remove_all(entry.path(), item_ec);
-            continue;
         }
-
-        const auto modified = fs::last_write_time(entry.path(), item_ec);
-        if (!item_ec && modified < cutoff) fs::remove_all(entry.path(), item_ec);
+        fs::remove_all(entry.path(), item_ec);
     }
     fs::remove(updates_root, ec);   // succeeds only when empty
 }
@@ -719,6 +724,12 @@ int run_update_helper(int argc, char** argv) {
     remove_file(stage.parent_path() / "package.tar.gz");
     remove_file(marker);
     append_update_log(log_path, "update installed successfully");
+
+    // The update is applied. The helper lives outside updates, so remove the
+    // complete staged release and the now-empty updates folder immediately.
+    fs::remove_all(stage.parent_path(), ec);
+    if (!stage.parent_path().parent_path().empty())
+        fs::remove(stage.parent_path().parent_path(), ec);   // empty updates root
     return 0;
 }
 

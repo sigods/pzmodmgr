@@ -1,4 +1,4 @@
-PZ Mod Manager 0.2.3 for Windows
+PZ Mod Manager 0.2.4 for Windows
 ================================
 
 PZ Mod Manager installs Project Zomboid Steam Workshop items and collections
@@ -11,7 +11,7 @@ installs of Project Zomboid.
 
 Installer
 ---------
-Run PZModManager-0.2.3-win64-setup.exe. It installs for the current Windows
+Run PZModManager-0.2.4-win64-setup.exe. It installs for the current Windows
 user, so no administrator rights are needed. The default location is:
 
     %LOCALAPPDATA%\Programs\PZModManager

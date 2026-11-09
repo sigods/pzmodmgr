@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PZ Mod Manager",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Right-click a Project Zomboid Workshop item or collection to install or update it with pzmodmgr.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtPOLkKkp2qWmMzB4eSeA0BUASI+aFnfTZowNH0KNFfhUlB0WkOHcPT997LwZ/IxPSxjcjCJGxRbgqV2JBLJwZc7aaIOcRGol2+xyvSPj51Xf6xnv1YERVOK069AbW1Mp8r+avSufOafNe9WsBxMhwUPFYKRWETu+jt942AtON7Bbjq8u+7cPmq+HzFh/WAk74wxgsWp660vPLRW/6al0jBosWV04gnG76CKF0B3jnuagVq/YYQ81ydEKQ/iXjRL5ZNXD5Sy8nb8TqCrtneyBXSXUAo8by0KHf5s7Cd0A2PQGGfWYLqFb+R3vq4Aburv6Bri6/sVXSHQR9T+Y3C0ijwIDAQAB",
   "permissions": ["contextMenus", "nativeMessaging", "notifications"],

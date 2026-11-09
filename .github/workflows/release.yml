@@ -34,6 +34,15 @@ jobs:
       - name: Package Linux artifacts
         run: ./scripts/package_linux.sh
 
+      - name: Verify Linux artifacts
+        run: |
+          version=$(sed -n 's/^project(pzmodmgr VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -1)
+          test -n "$version"
+          test -x "dist/PZModManager-$version-linux-x86_64.sh"
+          test -s "dist/PZModManager-$version-linux-x86_64.tar.gz"
+          tar -tzf "dist/PZModManager-$version-linux-x86_64.tar.gz" >/dev/null
+          (cd dist && sha256sum -c SHA256SUMS)
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -47,13 +56,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install MinGW-w64
+      - name: Install MinGW-w64 and UPX
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64-posix zip
+          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64-posix zip unzip upx-ucl
 
-      - name: Package Windows artifacts
-        run: ./scripts/package_windows.sh
+      - name: Verify tag matches project version
+        run: |
+          version=$(sed -n 's/^project(pzmodmgr VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -1)
+          test -n "$version"
+          test "v$version" = "$GITHUB_REF_NAME"
+
+      - name: Package Windows artifacts with UPX
+        run: UPX_BIN="$(command -v upx-ucl)" ./scripts/package_windows.sh
+
+      - name: Verify Windows artifacts
+        run: |
+          upx_bin=$(command -v upx-ucl)
+          version=$(sed -n 's/^project(pzmodmgr VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -1)
+          setup="dist/PZModManager-$version-win64-setup.exe"
+          zip="dist/PZModManager-$version-win64.zip"
+          test -s "$setup"
+          test -s "$zip"
+          (cd dist && sha256sum -c SHA256SUMS)
+          unzip -t "$zip"
+          unzip -l "$zip" > /tmp/pzmodmgr-win-zip.txt
+          for path in pzmodmgr.exe pzmodmgr_native_host.exe uninstall.exe \
+                      README.txt LICENSE.txt firefox/manifest.json \
+                      chrome-extension/manifest.json; do
+            grep -Fq "PZModManager-$version-win64/$path" /tmp/pzmodmgr-win-zip.txt
+          done
+          rm -rf /tmp/pzmodmgr-win-unpacked
+          mkdir -p /tmp/pzmodmgr-win-unpacked
+          unzip -q "$zip" -d /tmp/pzmodmgr-win-unpacked
+          "$upx_bin" -t "/tmp/pzmodmgr-win-unpacked/PZModManager-$version-win64/pzmodmgr.exe"
+          "$upx_bin" -t "$setup"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -77,6 +114,18 @@ jobs:
       - name: Generate checksums
         working-directory: release
         run: sha256sum PZModManager-* > SHA256SUMS
+
+      - name: Verify release artifacts
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for asset in "PZModManager-$version-linux-x86_64.sh" \
+                       "PZModManager-$version-linux-x86_64.tar.gz" \
+                       "PZModManager-$version-win64-setup.exe" \
+                       "PZModManager-$version-win64.zip"; do
+            test -s "release/$asset"
+          done
+          test -s release/SHA256SUMS
+          (cd release && sha256sum -c SHA256SUMS)
 
       - name: Publish GitHub release
         env:

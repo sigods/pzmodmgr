@@ -19,21 +19,22 @@ every child item it contains.
 
 The GUI is a native utility on both platforms: an accent-orange install action,
 a card list with each mod's `icon=` PNG, folder, enabled `ON`/`OFF` state,
-Ctrl/Shift multi-select (a plain row click toggles that mod without replacing the rest), double-click to update, and a compact activity log. The list can be
+click-to-toggle selection (Shift-click spans a range), double-click to update,
+and a compact activity log. The list can be
 filtered by name or folder, restricted to mods with an available update, and
 sorted by name or last update. Settings also switches the UI
 between light and dark themes; the choice is stored in `config.ini`. `Check`
 refreshes update availability
-through the Steam Web API; `UPDATE` badges mark the results. On GUI start, if
-mods are installed and the last check is more than a day old, `Check` runs once
-after the window appears. Reopening the GUI within a day does not check again;
-the manual `Check` button always works. Checks query up to four items at a time,
-while steamcmd downloads remain serial. An open window watches `installed.tsv`
-with OS file notifications, so installs from the CLI or the browser native host
-appear immediately without polling. Installs and updates are skipped when
-`versionMin`/`versionMax` target a different major Project Zomboid build (41,
-42, 43), so a newer Workshop item cannot replace a working mod with one that
-does not support the installed game. X11 adds Ctrl+V / Shift+Insert
+through the Steam Web API; `UPDATE` badges mark the results. On GUI start,
+`Check` runs once when the last mod or app-release check is more than a day old,
+even with no mods installed. It also checks the latest GitHub release, so
+`Update app` is enabled and green only when a newer version exists. Reopening
+the GUI within a day does not check again; the manual `Check` button always
+works. Checks query up to four items at a time, while steamcmd downloads remain
+serial. An open window watches `installed.tsv` with OS file notifications, so
+installs from the CLI or the browser native host appear immediately without
+polling. Game-compatible variants are preferred; an older-build mod is still
+installed with an activity warning instead of being blocked. X11 adds Ctrl+V / Shift+Insert
 / middle-click paste; Win32 keeps the native edit and list controls. The UI is
 drawn with Win32 and Xlib rather than a cross-platform toolkit, keeping the
 downloads small and dependency-free; `third_party/stb_image.h` is compiled in
@@ -54,9 +55,10 @@ run the Windows setup with `/ZOMBOIDDIR=C:\absolute\path`; it can also be
 changed later in Settings. Installed builds read and write `config.ini` next to
 the executable, so no bootstrap config is created in the default Zomboid folder.
 The manager then uses that folder's `mods` and `pzmodmgr` subfolders;
-`installed.tsv`, downloads, the temporary copy used during a replacement, and
-`last_check` follow the configured folder. The old copy is deleted after a
-successful swap, so updates do not leave a growing backup pile. Source/portable builds without an adjacent `config.ini` keep the old
+`installed.tsv`, downloads, the temporary copy used during a replacement,
+`last_check`, `last_app_check`, and the cached app release state follow the
+configured folder. The old copy is deleted after a successful swap, so updates
+do not leave a growing backup pile. Source/portable builds without an adjacent `config.ini` keep the old
 `~/Zomboid/pzmodmgr/config.ini` fallback. steamcmd is built in: on first use the app downloads Valve's
 official steamcmd into `<zomboid_dir>/pzmodmgr/steamcmd`. Settings can point at
 an existing installation; a system install is only a fallback when the download
@@ -88,18 +90,22 @@ upgrades in place instead of creating a second copy. The Linux installer follows
 the existing `~/.local/bin/pzmodmgr` symlink for the same behavior. The Windows
 package script prefers the POSIX-threaded MinGW compiler
 (`x86_64-w64-mingw32-g++-posix`); on Debian/Ubuntu install
-`g++-mingw-w64-x86-64-posix`.
+`g++-mingw-w64-x86-64-posix`. The release workflow also installs `upx-ucl`,
+packs `pzmodmgr.exe` and the setup executable, and verifies the release
+artifacts and checksums before creating the release.
 
-An installed or portable copy can also update itself from the latest GitHub
-release. Use `Update app` in either native UI, or run:
+An installed or portable copy can update itself from the latest GitHub release.
+The app checks daily with the mod updates; `Update app` is enabled and green
+only when a newer release is available. Use it in either native UI, or run:
 
 ```bash
 ./pzmodmgr self-update
 ```
 
-Abandoned staged releases and crashed download caches are pruned on startup;
-manager-created backups older than a week and downloads older than a day are
-removed. A staged update whose helper is still running is always preserved.
+A completed update removes its staged release immediately; abandoned release
+folders and crashed download caches are also pruned on startup. Manager-created
+backups older than a week and downloads older than a day are removed. A staged
+update whose helper is still running is always preserved.
 
 Releases are published by `.github/workflows/release.yml`. Push a `v*` tag that
 matches the CMake project version; the workflow builds and attaches the Linux
@@ -115,7 +121,7 @@ Linux distribution (single self-extracting `.sh` with a `.desktop` entry):
 
 ```bash
 ./scripts/package_linux.sh
-./dist/PZModManager-0.2.3-linux-x86_64.sh
+./dist/PZModManager-0.2.4-linux-x86_64.sh
 ```
 
 GCC/Clang Release builds (Linux and the MinGW Windows build) default to size

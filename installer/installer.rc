@@ -18,12 +18,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "pzmodmgr contributors"
             VALUE "FileDescription", "PZ Mod Manager Setup"
-            VALUE "FileVersion", "0.2.3"
+            VALUE "FileVersion", "0.2.4"
             VALUE "InternalName", "pzmodmgr-setup"
             VALUE "LegalCopyright", "Copyright (C) 2026 pzmodmgr contributors. GPL-3.0-only."
-            VALUE "OriginalFilename", "PZModManager-0.2.3-win64-setup.exe"
+            VALUE "OriginalFilename", "PZModManager-0.2.4-win64-setup.exe"
             VALUE "ProductName", "PZ Mod Manager"
-            VALUE "ProductVersion", "0.2.3"
+            VALUE "ProductVersion", "0.2.4"
         END
     END
     BLOCK "VarFileInfo"

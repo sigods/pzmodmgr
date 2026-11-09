@@ -216,6 +216,8 @@ void test_update_cache_cleanup(const pz::fs::path& root) {
                    "\nversion=0.4.0\n");
     write_file(updates / "recent" / "package.zip", "new");
     write_file(updates / "old" / "package.zip", "old");
+    const auto helper_dir = cfg.data_dir / "update_helper";
+    write_file(helper_dir / "pzmodmgr", "old helper");
     const auto stale = pz::fs::file_time_type::clock::now() -
                        std::chrono::hours(24 * 8);
     pz::fs::last_write_time(updates / "0.4.0", stale);
@@ -226,10 +228,12 @@ void test_update_cache_cleanup(const pz::fs::path& root) {
           "abandoned staged update is pruned");
     check(pz::fs::exists(updates / "0.4.0"),
           "staged update with a live helper is kept");
-    check(pz::fs::exists(updates / "recent"),
-          "recent update staging folder is kept");
+    check(!pz::fs::exists(updates / "recent"),
+          "completed update staging folder is pruned immediately");
     check(!pz::fs::exists(updates / "old"),
           "old update staging folder is pruned");
+    check(!pz::fs::exists(helper_dir),
+          "leftover update helper is pruned");
 }
 
 void test_external_reload(const pz::fs::path& root) {
@@ -493,8 +497,8 @@ void test_ui_helpers() {
               visible[0].time_updated == 50,
           "UI groups folders from one Workshop item into a single row");
     mod.folders.push_back("Other");
-    check(pz::mod_meta(mod, nullptr, "43") == "2 folders: Folder, Other",
-          "UI metadata names every folder in a grouped item");
+    check(pz::mod_meta(mod, nullptr, "43").empty(),
+          "UI metadata omits the folder list for a grouped item");
     check(pz::join_workshop_ids({7, 42}) == "7 42",
           "shared Workshop ID list is paste-ready");
 }
@@ -771,6 +775,11 @@ if [ -n "${FAKE_CURL_LOG:-}" ]; then
     printf '%s\n' "$*" >> "$FAKE_CURL_LOG"
 fi
 case "$*" in
+    *api.github.com/repos/sigods/pzmodmgr/releases/latest*)
+        if [ -n "${FAKE_CURL_APP_JSON:-}" ]; then
+            printf '%s\n' "$FAKE_CURL_APP_JSON"
+        fi
+        ;;
     *collectioncount*)
         if [ -n "${FAKE_CURL_COLLECTION_JSON:-}" ]; then
             printf '%s\n' "$FAKE_CURL_COLLECTION_JSON"
@@ -866,6 +875,8 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(check_result.ok, "check_updates succeeds: " + check_result.message);
     check(mm.update_available(123456789), "update availability recorded");
     check(read_file(steam_log) == downloads_before_check, "check does not download");
+    const std::uint64_t check_now = static_cast<std::uint64_t>(std::time(nullptr));
+    write_file(cfg.data_dir / "last_app_check", std::to_string(check_now));
     check(!mm.update_check_due(), "recent update check is not due");
     check(pz::fs::exists(cfg.data_dir / "last_check"), "last check time persisted");
     {
@@ -972,17 +983,23 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(mm.list().size() == 1, "unavailable item does not change db");
     set_json_time(1700000900);
 
-    // A first install whose mod.info targets another major game build is refused.
-    setenv("FAKE_STEAMCMD_VERSION_MIN", "43.0", 1);
+    // A first install whose mod.info targets an older major game build is
+    // allowed, with an activity warning instead of a hard failure.
+    setenv("FAKE_STEAMCMD_PER_ITEM", "1", 1);
+    setenv("FAKE_STEAMCMD_VERSION_MAX", "41.0", 1);
     log.clear();
-    auto incompatible = mm.add("777", logfn);
-    check(!incompatible.ok && incompatible.message.find("does not support") != std::string::npos,
-          "incompatible first install rejected: " + incompatible.message);
-    check(!pz::fs::exists(cfg.user_mods_dir / "FixtureMod777"),
-          "incompatible first install leaves no mod folder");
+    auto older_build = mm.add("777", logfn);
+    check(older_build.ok, "older-build first install succeeds: " + older_build.message);
+    check(pz::fs::exists(cfg.user_mods_dir / "FixtureMod777" / "mod.info"),
+          "older-build mod folder installed");
+    check(std::find(log.begin(), log.end(),
+              "warning: Fixture Mod 777 targets PZ up to 41.0, installed 42.21.0; installing anyway") != log.end(),
+          "older-build install leaves an activity warning");
     check(!pz::fs::exists(cfg.data_dir / "steam_cache" / "777"),
-          "incompatible per-download cache removed");
-    unsetenv("FAKE_STEAMCMD_VERSION_MIN");
+          "older-build per-download cache removed");
+    unsetenv("FAKE_STEAMCMD_VERSION_MAX");
+    unsetenv("FAKE_STEAMCMD_PER_ITEM");
+    check(mm.remove(777, logfn).ok, "older-build fixture removed");
 
     // remove command deletes only the recorded folder.
     auto rem = pz::run_command(mm, "remove 123456789", logfn);
@@ -1169,6 +1186,38 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(cfg_cmd.ok, "config command succeeds: " + cfg_cmd.message);
     check(read_file(cfg.data_dir / "config.ini").find("steam_user=ui-user") != std::string::npos,
           "config command persists the Steam user");
+
+    // A daily check also checks the latest app release, so the UI can enable
+    // its Update app button without waiting for the user to ask.
+    setenv("FAKE_CURL_APP_JSON",
+           R"({"tag_name":"v99.0.0","assets":[{"name":"PZModManager-99.0.0-linux-x86_64.tar.gz","browser_download_url":"https://example/linux.tar.gz","size":1,"digest":"sha256:abc"}]})",
+           1);
+    log.clear();
+    auto app_check = pz::run_command(mm, "check", logfn);
+    check(app_check.ok, "check command with app release succeeds: " + app_check.message);
+    check(mm.app_update_available(), "daily check records an available app update");
+    check(std::find(log.begin(), log.end(),
+              "PZ Mod Manager 99.0.0 is available.") != log.end(),
+          "app update availability is logged");
+    check(!mm.app_update_check_due(), "app check is recorded for the day");
+    check(pz::fs::exists(cfg.data_dir / "app_update"), "app update state persisted");
+    {
+        pz::ModManager restarted(cfg);
+        check(restarted.app_update_available(),
+              "app update availability survives a restart");
+        check(!restarted.update_check_due(),
+              "recent app and mod checks are not repeated after restart");
+    }
+    const auto app_now = static_cast<std::uint64_t>(std::time(nullptr));
+    write_file(cfg.data_dir / "last_app_check", std::to_string(app_now - 86401));
+    check(mm.app_update_check_due(), "app check is due after a day");
+    write_file(cfg.data_dir / "app_update", std::string(pz::app_version()) + "\n");
+    {
+        pz::ModManager current(cfg);
+        check(!current.app_update_available(),
+              "running the cached release clears the app update state");
+    }
+    unsetenv("FAKE_CURL_APP_JSON");
 #else
     std::printf("SKIP: FAKE_STEAMCMD_PATH not defined; install flow not tested\n");
 #endif
