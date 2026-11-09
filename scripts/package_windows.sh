@@ -123,12 +123,15 @@ x86_64-w64-mingw32-windres -I "$ROOT/installer" \
     "$ROOT/installer/installer.rc" -O coff -o "$WORK/installer-res.o"
 x86_64-w64-mingw32-windres "$WORK/payload.rc" -O coff -o "$WORK/payload-res.o"
 
-"$WIN_CXX" -std=c++17 -O2 -municode -mwindows \
+"$WIN_CXX" -std=c++17 -Os -municode -mwindows \
     -static -static-libgcc -static-libstdc++ \
+    -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
+    -fno-unwind-tables -fno-asynchronous-unwind-tables \
+    -Wl,--gc-sections \
     -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
     -DPZ_VERSION="L\"$VERSION\"" \
     -I"$ROOT/installer" \
-    "$ROOT/installer/installer.cpp" \
+    "$ROOT/installer/installer.cpp" "$ROOT/src/core/runtime_min.cpp" \
     "$WORK/installer-res.o" "$WORK/payload-res.o" \
     -o "$OUT/$NAME-setup.exe" \
     -lcomctl32 -lshell32 -lshlwapi -lole32 -luuid -ladvapi32 \

@@ -1,6 +1,9 @@
 #include "ui/mod_icon.hpp"
 
 #define STBI_ONLY_PNG
+#define STBI_NO_LINEAR
+#define STBI_NO_FAILURE_STRINGS
+#define STBI_NO_THREAD_LOCALS
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
