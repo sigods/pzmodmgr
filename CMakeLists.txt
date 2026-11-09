@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
-project(pzmodmgr VERSION 0.2.4 LANGUAGES CXX)
+project(pzmodmgr VERSION 0.2.4 LANGUAGES C CXX)
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -9,19 +12,47 @@ find_package(Threads REQUIRED)
 # GC. GCC's -O3 inlining is a major part of this app's binary size; -Os plus
 # dead-section removal cuts both executables substantially. MinGW benefits most
 # because it links libstdc++ statically. Disable this option to build a baseline
-# with the toolchain's normal Release flags for benchmarking. LTO was measured
-# as larger than this setup on Linux, so it is intentionally not used.
+# with the toolchain's normal Release flags for benchmarking. LTO is enabled
+# separately below; after the exception/unwinder runtime was removed it now
+# gives a further measurable reduction rather than growing the image.
 option(PZMODMGR_SIZE_OPT "Optimize GCC/Clang release builds for size" ON)
 if(PZMODMGR_SIZE_OPT AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
    (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32))
-  set(CMAKE_CXX_FLAGS_RELEASE
-      "-Os -DNDEBUG -ffunction-sections -fdata-sections -fno-rtti")
-  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-Wl,--gc-sections")
+  # Use generator expressions and add_*_options instead of assigning the
+  # CMAKE_*_FLAGS_RELEASE cache entries: a plain set() here does not override
+  # the toolchain's cached "-O3 -DNDEBUG".
+  add_compile_options(
+      $<$<CONFIG:Release>:-Os>
+      $<$<CONFIG:Release>:-ffunction-sections>
+      $<$<CONFIG:Release>:-fdata-sections>
+      $<$<CONFIG:Release>:-fvisibility=hidden>
+      $<$<CONFIG:Release>:-fno-unwind-tables>
+      $<$<CONFIG:Release>:-fno-asynchronous-unwind-tables>
+      $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-fno-rtti>
+      $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-fno-exceptions>)
+  add_link_options($<$<CONFIG:Release>:-Wl,--gc-sections>)
+endif()
+
+# Keep the shipped Linux binaries independent of the system C++ runtime. The
+# source-level C99 conversion is in progress; this removes the external
+# libstdc++/libgcc_s dependency for builds in the meantime.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libstdc++ -static-libgcc")
+endif()
+
+if(WIN32)
+  set(PZMODMGR_FS_SOURCE src/core/fs_win.cpp)
+else()
+  set(PZMODMGR_FS_SOURCE src/core/fs_posix.cpp)
 endif()
 
 add_library(pzcore STATIC
+  src/core/runtime_min.cpp
+  src/core/error_code.cpp
   src/core/paths.cpp
+  ${PZMODMGR_FS_SOURCE}
   src/core/activation.cpp
+  src/core/url.c
   src/core/url.cpp
   src/core/steamcmd.cpp
   src/core/mod_info.cpp
@@ -81,7 +112,36 @@ else()
   find_package(X11 REQUIRED)
   target_sources(pzmodmgr PRIVATE src/ui/x11/x11_ui.cpp)
   target_include_directories(pzmodmgr PRIVATE ${X11_INCLUDE_DIR})
-  target_link_libraries(pzmodmgr PRIVATE ${X11_LIBRARIES})
+  # Link only Xlib itself. The legacy X11_LIBRARIES variable also lists SM,
+  # ICE and Xext, none of which this UI uses; leaving them as direct NEEDED
+  # entries made the dynamic loader map three unnecessary libraries.
+  target_link_libraries(pzmodmgr PRIVATE X11::X11)
+  add_link_options(-Wl,--as-needed)
+endif()
+
+# Link-time optimization. Keep it opt-out for reproducible size comparisons.
+# MinGW GCC 15.2 has a reproducible LTO ICE in binds_to_current_def_p() when
+# optimizing this UI, so its default is off there; Linux GCC/Clang use it.
+set(PZMODMGR_LTO_DEFAULT ON)
+if(MINGW AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  set(PZMODMGR_LTO_DEFAULT OFF)
+endif()
+option(PZMODMGR_LTO "Use LTO for release builds" ${PZMODMGR_LTO_DEFAULT})
+if(PZMODMGR_LTO AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT PZMODMGR_IPO_SUPPORTED OUTPUT PZMODMGR_IPO_ERROR
+                      LANGUAGES C CXX)
+  if(PZMODMGR_IPO_SUPPORTED)
+    set(PZMODMGR_LTO_TARGETS pzcore pzmodmgr pzmodmgr_native_host)
+    if(TARGET pzcore_tests)
+      list(APPEND PZMODMGR_LTO_TARGETS pzcore_tests)
+    endif()
+    foreach(target IN LISTS PZMODMGR_LTO_TARGETS)
+      set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endforeach()
+  else()
+    message(STATUS "LTO unavailable: ${PZMODMGR_IPO_ERROR}")
+  endif()
 endif()
 
 # Core tests; the test copies the fake steamcmd to a temp dir at runtime.

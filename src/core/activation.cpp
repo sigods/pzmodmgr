@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <set>
 
 namespace pz {
 namespace {
@@ -345,7 +344,7 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
     targets.push_back(defaults);
 
     std::vector<ActivationTarget> saves;
-    std::error_code ec;
+    pz::error_code ec;
     fs::directory_iterator modes(zomboid_dir / "Saves", ec);
     if (!ec) {
         for (const auto& mode : modes) {
@@ -360,7 +359,7 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
                               game.path().filename().string();
                 target.label = display_name(target.kind, target.name);
                 target.path = game.path() / "mods.txt";
-                std::error_code thumb_ec;
+                pz::error_code thumb_ec;
                 const fs::path thumb = game.path() / "thumb.png";
                 if (fs::is_regular_file(thumb, thumb_ec)) target.thumbnail = thumb;
                 read_activation_target(target);

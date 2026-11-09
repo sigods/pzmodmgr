@@ -1,25 +1,22 @@
+#include "core/flat_map.hpp"
 #include "ui/ui.hpp"
 #include "ui/mod_icon.hpp"
 #include "ui/glyphs.hpp"
 #include "core/commands.hpp"
+#include "core/thread.hpp"
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <algorithm>
 #include <cerrno>
-#include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <deque>
-#include <exception>
 #include <fcntl.h>
-#include <map>
-#include <mutex>
 #include <poll.h>
-#include <set>
 #include <string>
-#include <thread>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
 #if defined(__linux__)
@@ -35,6 +32,13 @@ constexpr int kInstallX = 684, kInstallW = 212;
 constexpr int kFilterY = 158, kFilterH = 24;
 constexpr int kListTop = 192, kRowH = 64, kRowGap = 6, kRows = 5;
 constexpr int kCardW = 872;
+
+std::uint64_t monotonic_millis() {
+    timespec now{};
+    ::clock_gettime(CLOCK_MONOTONIC, &now);
+    return static_cast<std::uint64_t>(now.tv_sec) * 1000u +
+           static_cast<std::uint64_t>(now.tv_nsec) / 1000000u;
+}
 // The scrollbar lives in the right margin, outside the rows, so clicking the
 // end of a row never pages the list. kScrollGrab adds a little slack around
 // the thumb: a near miss starts a drag instead of jumping by a page.
@@ -256,6 +260,35 @@ XImage* make_icon_image(Display* d, int scr, const ModIcon& icon,
     }
     return image;
 }
+
+// Upload the icon once and keep only the server-side pixmap. Keeping an
+// XImage per mod costs 48x48x4 bytes of client heap and repeats the upload on
+// every repaint; a pixmap lets XCopyArea reuse the already converted pixels.
+struct CachedIcon {
+    Pixmap pixmap = None;
+    unsigned width = 0;
+    unsigned height = 0;
+};
+
+CachedIcon make_icon_pixmap(Display* d, Window w, int scr, GC gc,
+                            const ModIcon& icon, unsigned long background) {
+    CachedIcon cached;
+    XImage* image = make_icon_image(d, scr, icon, background);
+    if (!image) return cached;
+
+    const Pixmap pixmap = XCreatePixmap(d, w, static_cast<unsigned>(icon.size),
+                                        static_cast<unsigned>(icon.size),
+                                        static_cast<unsigned>(DefaultDepth(d, scr)));
+    if (pixmap != None) {
+        XPutImage(d, pixmap, gc, image, 0, 0, 0, 0,
+                  static_cast<unsigned>(icon.size), static_cast<unsigned>(icon.size));
+        cached.pixmap = pixmap;
+        cached.width = static_cast<unsigned>(icon.size);
+        cached.height = static_cast<unsigned>(icon.size);
+    }
+    XDestroyImage(image);
+    return cached;
+}
 }  // namespace
 
 int run_ui(ModManager& mm) {
@@ -388,7 +421,7 @@ int run_ui(ModManager& mm) {
     }
     Drawable win = backbuf;
 
-    std::deque<std::string> log;
+    std::vector<std::string> log;
     std::string input;
     bool busy = false;
     bool app_update_available = mm.app_update_available();
@@ -400,8 +433,8 @@ int run_ui(ModManager& mm) {
     bool paste_pending = false;
     bool paste_fallback = false;
 
-    std::set<std::uint64_t> selected_ids;
-    std::set<std::string> selected_folders;
+    pz::flat_set<std::uint64_t> selected_ids;
+    pz::flat_set<std::string> selected_folders;
     bool confirm_remove = false;
     std::string filter_text;
     bool only_updates = false;
@@ -422,7 +455,7 @@ int run_ui(ModManager& mm) {
     int last_mouse_y = -1;
     int anchor_index = -1;
     int last_click_index = -1;
-    std::chrono::steady_clock::time_point last_click_time;
+    std::uint64_t last_click_time = 0;
     std::vector<ModRow> visible;
     bool list_dirty = true;
     bool frame_pending = false;
@@ -464,20 +497,20 @@ int run_ui(ModManager& mm) {
     std::string dependency_warning;
     std::string dependency_signature;
 
-    std::map<std::string, XImage*> icon_cache;
-    std::map<std::string, XImage*> target_icon_cache;
-    std::map<std::string, std::optional<ModInfo>> info_cache;
+    pz::flat_map<std::string, CachedIcon> icon_cache;
+    pz::flat_map<std::string, CachedIcon> target_icon_cache;
+    pz::flat_map<std::string, std::optional<ModInfo>> info_cache;
 
-    std::mutex pending_mu;
-    std::deque<std::string> pending;
+    pz::mutex pending_mu;
+    std::vector<std::string> pending;
     bool worker_done = false;
-    std::thread worker;
+    thread worker;
     int watch_fd = -1;
     bool reload_pending = false;
 
     auto push = [&log](const std::string& s) {
         log.push_back(s);
-        while (log.size() > 300) log.pop_front();
+        while (log.size() > 300) log.erase(log.begin());
     };
 
     auto refresh_dependency_warning = [&]() {
@@ -501,26 +534,26 @@ int run_ui(ModManager& mm) {
 
     auto enqueue = [&](const std::string& s) {
         {
-            std::lock_guard<std::mutex> lock(pending_mu);
+            pz::lock_guard lock(pending_mu);
             pending.push_back(s);
         }
         wake_ui();
     };
 
     auto drain_pending = [&]() {
-        std::deque<std::string> batch;
+        std::vector<std::string> batch;
         {
-            std::lock_guard<std::mutex> lock(pending_mu);
+            pz::lock_guard lock(pending_mu);
             batch.swap(pending);
         }
         for (const auto& s : batch) push(s);
-        std::lock_guard<std::mutex> lock(pending_mu);
+        pz::lock_guard lock(pending_mu);
         bool done = worker_done;
         worker_done = false;
         return done;
     };
 
-    auto build_command = [](const std::string& verb, const std::set<std::uint64_t>& ids) {
+    auto build_command = [](const std::string& verb, const pz::flat_set<std::uint64_t>& ids) {
         std::string cmd = verb;
         for (auto id : ids) cmd += " " + std::to_string(id);
         return cmd;
@@ -727,7 +760,7 @@ int run_ui(ModManager& mm) {
     auto clear_icons = [&]() {
         for (auto& [folder, image] : icon_cache) {
             (void)folder;
-            if (image) XDestroyImage(image);
+            if (image.pixmap != None) XFreePixmap(dpy, image.pixmap);
         }
         icon_cache.clear();
         info_cache.clear();
@@ -744,16 +777,16 @@ int run_ui(ModManager& mm) {
         return folder_info(m.folders.front());
     };
 
-    auto get_icon = [&](const ModRow& m) -> XImage* {
+    auto get_icon = [&](const ModRow& m) -> CachedIcon {
         auto it = icon_cache.find(m.folders.front());
         if (it != icon_cache.end()) return it->second;
         const auto& info = get_info(m);
         const fs::path path = info ? info->icon : fs::path{};
-        XImage* image = nullptr;
+        CachedIcon image;
         if (!path.empty()) {
             ModIcon icon;
             if (load_mod_icon(path, 48, icon))
-                image = make_icon_image(dpy, scr, icon, pal.surface);
+                image = make_icon_pixmap(dpy, wnd, scr, gc, icon, pal.surface);
         }
         icon_cache[m.folders.front()] = image;
         return image;
@@ -762,20 +795,20 @@ int run_ui(ModManager& mm) {
     auto clear_target_icons = [&]() {
         for (auto& [path, image] : target_icon_cache) {
             (void)path;
-            if (image) XDestroyImage(image);
+            if (image.pixmap != None) XFreePixmap(dpy, image.pixmap);
         }
         target_icon_cache.clear();
     };
 
-    auto get_target_icon = [&](const ActivationTarget& target) -> XImage* {
-        if (target.kind != ActivationKind::Save || target.thumbnail.empty()) return nullptr;
+    auto get_target_icon = [&](const ActivationTarget& target) -> CachedIcon {
+        if (target.kind != ActivationKind::Save || target.thumbnail.empty()) return {};
         const std::string key = target.thumbnail.string();
         auto it = target_icon_cache.find(key);
         if (it != target_icon_cache.end()) return it->second;
         ModIcon icon;
-        XImage* image = nullptr;
+        CachedIcon image;
         if (load_mod_icon(target.thumbnail, 24, icon))
-            image = make_icon_image(dpy, scr, icon, pal.surface);
+            image = make_icon_pixmap(dpy, wnd, scr, gc, icon, pal.surface);
         target_icon_cache[key] = image;
         return image;
     };
@@ -801,8 +834,8 @@ int run_ui(ModManager& mm) {
         }
         list_offset = std::min(std::max(0, list_offset),
                                std::max(0, static_cast<int>(visible.size()) - kRows));
-        std::set<std::uint64_t> present;
-        std::set<std::string> present_folders;
+        pz::flat_set<std::uint64_t> present;
+        pz::flat_set<std::string> present_folders;
         for (const auto& m : visible) {
             present.insert(m.workshop_id);
             if (m.workshop_id == 0 && !m.folders.empty())
@@ -996,15 +1029,13 @@ int run_ui(ModManager& mm) {
                     : std::to_string(count) + " of " +
                       std::to_string(target_mod_ids.size()) + " on";
                 const int state_w = text_width(body, state);
-                XImage* image = get_target_icon(target);
-                if (image) {
-                    XPutImage(dpy, win, gc, image, 0, 0, row.x + 8,
-                              row.y + (row.h - 24) / 2,
-                              static_cast<unsigned>(image->width),
-                              static_cast<unsigned>(image->height));
+                const CachedIcon image = get_target_icon(target);
+                if (image.pixmap != None) {
+                    XCopyArea(dpy, image.pixmap, win, gc, 0, 0, image.width,
+                              image.height, row.x + 8, row.y + (row.h - 24) / 2);
                 }
-                const int text_x = row.x + (image ? 42 : 12);
-                const int label_w = row.w - state_w - (image ? 54 : 36);
+                const int text_x = row.x + (image.pixmap != None ? 42 : 12);
+                const int label_w = row.w - state_w - (image.pixmap != None ? 54 : 36);
                 text(dpy, win, gc, body, text_x, row.y + row.h / 2 + 5,
                      elide(body, target.label, label_w), pal.text);
                 text(dpy, win, gc, body, row.x + row.w - 12 - state_w,
@@ -1120,12 +1151,11 @@ int run_ui(ModManager& mm) {
                 fill(dpy, win, gc, card.x, card.y, card.w, card.h, card_fill);
                 frame(dpy, win, gc, card.x, card.y, card.w, card.h, card_border);
 
-                XImage* image = get_icon(m);
+                const CachedIcon image = get_icon(m);
                 const int icon_x = card.x + 10, icon_y = card.y + 8;
-                if (image) {
-                    XPutImage(dpy, win, gc, image, 0, 0, icon_x, icon_y,
-                              static_cast<unsigned>(image->width),
-                              static_cast<unsigned>(image->height));
+                if (image.pixmap != None) {
+                    XCopyArea(dpy, image.pixmap, win, gc, 0, 0, image.width,
+                              image.height, icon_x, icon_y);
                 } else {
                     fill(dpy, win, gc, icon_x, icon_y, 48, 48, pal.accent_soft);
                     const std::string initial = m.name.empty() ? "?" : m.name.substr(0, 1);
@@ -1303,19 +1333,18 @@ int run_ui(ModManager& mm) {
         push("> " + line);
         busy = true;
         if (worker.joinable()) worker.join();
-        try {
-            worker = std::thread([&, line]() {
-                auto r = run_command(mm, line, enqueue);
-                {
-                    std::lock_guard<std::mutex> lock(pending_mu);
-                    pending.push_back(std::string(r.ok ? "OK: " : "ERROR: ") + r.message);
-                    worker_done = true;
-                }
-                wake_ui();
-            });
-        } catch (const std::exception& e) {
+        worker = thread([&, line]() {
+            auto r = run_command(mm, line, enqueue);
+            {
+                pz::lock_guard lock(pending_mu);
+                pending.push_back(std::string(r.ok ? "OK: " : "ERROR: ") + r.message);
+                worker_done = true;
+            }
+            wake_ui();
+        });
+        if (!worker.joinable()) {
             busy = false;
-            push(std::string("ERROR: cannot start worker: ") + e.what());
+            push("ERROR: cannot start worker");
         }
         redraw();
     };
@@ -1912,10 +1941,10 @@ int run_ui(ModManager& mm) {
                 if (index >= 0) {
                     const auto& row = visible[static_cast<std::size_t>(index)];
                     const auto id = row.workshop_id;
-                    const auto now = std::chrono::steady_clock::now();
+                    const std::uint64_t now = monotonic_millis();
                     const bool double_click =
-                        last_click_index == index &&
-                        now - last_click_time < std::chrono::milliseconds(450);
+                        last_click_index == index && last_click_time != 0 &&
+                        now - last_click_time < 450;
                     if (double_click && id != 0) {
                         clear_all();
                         select_row(row);

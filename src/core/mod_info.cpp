@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <charconv>
 #include <cctype>
-#include <system_error>
 #include <vector>
 
 namespace pz {
@@ -46,7 +45,7 @@ int version_rank(const std::string& name) {
 
 fs::path resolve_icon(const fs::path& root, const fs::path& info_dir, const std::string& value) {
     auto regular = [](const fs::path& p) {
-        std::error_code ec;
+        pz::error_code ec;
         return fs::is_regular_file(p, ec);
     };
 
@@ -98,7 +97,7 @@ bool info_supports_game(const fs::path& info_dir, const std::string& game_versio
 // When a game version is given, choose the newest version folder that supports
 // it instead of blindly choosing the highest folder number.
 fs::path mod_info_dir(const fs::path& dir, const std::string& game_version = {}) {
-    std::error_code ec;
+    pz::error_code ec;
     if (fs::is_regular_file(dir / "mod.info", ec)) return dir;
 
     fs::directory_iterator it(dir, ec);
@@ -130,7 +129,7 @@ std::vector<fs::path> discover_mod_roots(const fs::path& content) {
         return roots;
     }
     for (const auto& base : {content / "mods", content / "Contents" / "mods"}) {
-        std::error_code ec;
+        pz::error_code ec;
         if (!fs::is_directory(base, ec)) continue;
         for (const auto& e : fs::directory_iterator(base)) {
             if (e.is_directory() && !mod_info_dir(e.path()).empty())

@@ -1,15 +1,41 @@
 #pragma once
+#include "core/fs_native.hpp"
 #include <cstdint>
-#include <filesystem>
-#include <functional>
 #include <string>
 
 namespace pz {
-namespace fs = std::filesystem;
+namespace fs = native_fs;
 
 inline constexpr std::uint32_t kProjectZomboidAppId = 108600;
 
-using LogFn = std::function<void(const std::string&)>;
+// A C-compatible callback: one function pointer plus an opaque context. The
+// templated constructor is a C++ convenience for existing lambdas; the storage
+// itself is what a C99 version of this header will use.
+struct LogFn {
+    using Callback = void (*)(void* context, const char* line);
+
+    LogFn() = default;
+    LogFn(Callback callback, void* context) : callback_(callback), context_(context) {}
+
+    template <typename F>
+    LogFn(const F& function)
+        : callback_([](void* context, const char* line) {
+              (*static_cast<const F*>(context))(std::string(line));
+          }),
+          context_(const_cast<F*>(&function)) {}
+
+    void operator()(const std::string& line) const {
+        if (callback_) callback_(context_, line.c_str());
+    }
+    void operator()(const char* line) const {
+        if (callback_) callback_(context_, line);
+    }
+    explicit operator bool() const { return callback_ != nullptr; }
+
+private:
+    Callback callback_ = nullptr;
+    void* context_ = nullptr;
+};
 
 struct Config {
     fs::path steamcmd_exe;        // built-in path, or a user-set override

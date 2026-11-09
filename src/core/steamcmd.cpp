@@ -1,16 +1,13 @@
 #include "core/steamcmd.hpp"
 #include "core/paths.hpp"
+#include "core/thread.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cerrno>
 #include <charconv>
-#include <chrono>
 #include <cstdio>
-#include <functional>
 #include <string_view>
-#include <system_error>
-#include <thread>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -63,8 +60,8 @@ std::wstring widen(const std::string& s) {
 // allocate one for every curl.exe and steamcmd.exe child. That showed up as a
 // blank console window flashing on each Install/Check (one per child). The
 // handles are still pipes, so the output is captured exactly as before.
-int spawn_capture(const std::string& cmd,
-                  const std::function<void(const char*, std::size_t)>& sink) {
+template <typename Sink>
+int spawn_capture(const std::string& cmd, Sink&& sink) {
 #ifdef _WIN32
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -222,7 +219,7 @@ bool http_get(const std::string& url, std::string& response, std::string& detail
 
 bool download_url(const std::string& url, const fs::path& dest, std::string& detail) {
     detail.clear();
-    std::error_code ec;
+    pz::error_code ec;
     if (!dest.parent_path().empty()) fs::create_directories(dest.parent_path(), ec);
     if (ec) {
         detail = ec.message();
@@ -264,7 +261,7 @@ bool download_url(const std::string& url, const fs::path& dest, std::string& det
 bool extract_archive(const fs::path& archive, const fs::path& dest,
                      std::string& detail) {
     detail.clear();
-    std::error_code ec;
+    pz::error_code ec;
     fs::create_directories(dest, ec);
     if (ec) {
         detail = ec.message();
@@ -366,7 +363,7 @@ bool wait_for_process(unsigned long pid) {
             if (errno == ESRCH) return true;
             if (errno != EPERM) return true;
         }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        sleep_milliseconds(1000);
     }
 #endif
 }
@@ -394,7 +391,7 @@ unsigned long current_process_id() {
 }
 
 fs::path ensure_steamcmd(Config& cfg, const LogFn& log) {
-    std::error_code ec;
+    pz::error_code ec;
     if (!cfg.steamcmd_exe.empty() && fs::is_regular_file(cfg.steamcmd_exe, ec))
         return cfg.steamcmd_exe;
 
@@ -493,7 +490,7 @@ DownloadOutcome steamcmd_download_workshop_item(Config& cfg,
     out.content_dir = install_dir / "steamapps" / "workshop" / "content"
                     / std::to_string(kProjectZomboidAppId) / std::to_string(item_id);
 
-    std::error_code ec;
+    pz::error_code ec;
     bool has_content = fs::is_directory(out.content_dir, ec) && !fs::is_empty(out.content_dir, ec);
     out.ok = (rc == 0) && has_content;
     if (!out.ok) {

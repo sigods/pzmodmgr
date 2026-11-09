@@ -1,7 +1,9 @@
+#include "core/flat_map.hpp"
 #include "ui/ui.hpp"
 #include "ui/mod_icon.hpp"
 #include "ui/glyphs.hpp"
 #include "core/commands.hpp"
+#include "core/thread.hpp"
 // Keep std::min/std::max usable; windows.h would otherwise define macros.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -11,13 +13,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
-#include <deque>
-#include <exception>
 #include <initializer_list>
-#include <map>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace pz {
@@ -130,12 +127,12 @@ HBRUSH g_brand_brush = nullptr;
 HBRUSH g_brand_soft_brush = nullptr;
 HBRUSH g_border_strong_brush = nullptr;
 
-std::thread g_worker;
-std::thread g_watch_worker;
+thread g_worker;
+thread g_watch_worker;
 HANDLE g_watch_change = nullptr;
 HANDLE g_watch_stop = nullptr;
-std::mutex g_pending_mu;
-std::deque<std::string> g_pending;
+pz::mutex g_pending_mu;
+std::vector<std::string> g_pending;
 std::vector<std::wstring> g_row_names;
 std::vector<std::wstring> g_row_meta;
 std::vector<std::string> g_row_folders;
@@ -146,9 +143,9 @@ std::vector<std::uint64_t> g_selected_ids;
 std::vector<std::string> g_selected_folders;
 bool g_only_updates = false;
 int g_sort_mode = 0;
-std::map<std::string, HBITMAP> g_icons;
-std::map<std::string, HBITMAP> g_target_icons;
-std::map<std::string, std::optional<ModInfo>> g_info_cache;
+pz::flat_map<std::string, HBITMAP> g_icons;
+pz::flat_map<std::string, HBITMAP> g_target_icons;
+pz::flat_map<std::string, std::optional<ModInfo>> g_info_cache;
 std::string g_dependency_warning;
 std::string g_dependency_signature;
 bool g_busy = false;
@@ -159,7 +156,7 @@ struct EditPlaceholder {
     WNDPROC old_proc = nullptr;
     const wchar_t* text = nullptr;
 };
-std::map<HWND, EditPlaceholder> g_edit_placeholders;
+pz::flat_map<HWND, EditPlaceholder> g_edit_placeholders;
 
 std::wstring to_w(const std::string& s) {
     if (s.empty()) return {};
@@ -207,19 +204,18 @@ bool start_watcher(const fs::path& dir) {
         g_watch_stop = nullptr;
         return false;
     }
-    try {
-        g_watch_worker = std::thread([] {
-            HANDLE handles[2] = {g_watch_change, g_watch_stop};
-            for (;;) {
-                const DWORD result =
-                    WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-                if (result == WAIT_OBJECT_0 + 1) break;
-                if (result != WAIT_OBJECT_0) break;
-                if (g_hwnd) PostMessageW(g_hwnd, WM_APP_RELOAD, 0, 0);
-                if (!FindNextChangeNotification(g_watch_change)) break;
-            }
-        });
-    } catch (...) {
+    g_watch_worker = thread([] {
+        HANDLE handles[2] = {g_watch_change, g_watch_stop};
+        for (;;) {
+            const DWORD result =
+                WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+            if (result == WAIT_OBJECT_0 + 1) break;
+            if (result != WAIT_OBJECT_0) break;
+            if (g_hwnd) PostMessageW(g_hwnd, WM_APP_RELOAD, 0, 0);
+            if (!FindNextChangeNotification(g_watch_change)) break;
+        }
+    });
+    if (!g_watch_worker.joinable()) {
         stop_watcher();
         return false;
     }
@@ -1164,9 +1160,9 @@ void copy_selected_ids() {
 }
 
 void drain_pending() {
-    std::deque<std::string> batch;
+    std::vector<std::string> batch;
     {
-        std::lock_guard<std::mutex> lock(g_pending_mu);
+        pz::lock_guard lock(g_pending_mu);
         batch.swap(g_pending);
     }
     for (const auto& line : batch) append_log(line);
@@ -1175,14 +1171,14 @@ void drain_pending() {
 void worker_main(std::string line) {
     auto r = run_command(*g_mm, line, [](const std::string& s) {
         {
-            std::lock_guard<std::mutex> lock(g_pending_mu);
+            pz::lock_guard lock(g_pending_mu);
             g_pending.push_back(s);
         }
         PostMessageW(g_hwnd, WM_APP_LOG, 0, 0);
     });
 
     {
-        std::lock_guard<std::mutex> lock(g_pending_mu);
+        pz::lock_guard lock(g_pending_mu);
         g_pending.push_back(std::string(r.ok ? "OK: " : "ERROR: ") + r.message);
     }
     PostMessageW(g_hwnd, WM_APP_DONE, 0, 0);
@@ -1201,16 +1197,15 @@ void start_command(const std::string& line) {
     set_status("Working - steamcmd may take a while...");
 
     if (g_worker.joinable()) g_worker.join();
-    try {
-        g_worker = std::thread(worker_main, line);
-    } catch (const std::exception& e) {
+    g_worker = thread([line]() { worker_main(line); });
+    if (!g_worker.joinable()) {
         g_busy = false;
         EnableWindow(g_input, TRUE);
         EnableWindow(g_list, TRUE);
         update_actions();
         update_count_label();
         set_status("Ready");
-        append_log(std::string("ERROR: cannot start worker: ") + e.what());
+        append_log("ERROR: cannot start worker");
     }
 }
 

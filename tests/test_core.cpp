@@ -9,12 +9,9 @@
 #include "ui/ui.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -31,24 +28,33 @@ void check(bool ok, const std::string& what) {
 
 void write_file(const pz::fs::path& p, const std::string& content) {
     pz::fs::create_directories(p.parent_path());
-    std::ofstream out(p, std::ios::binary | std::ios::trunc);
-    out << content;
+    std::FILE* out = std::fopen(p.c_str(), "wb");
+    if (!out) return;
+    std::fwrite(content.data(), 1, content.size(), out);
+    std::fclose(out);
 }
 
 std::string read_file(const pz::fs::path& p) {
-    std::ifstream in(p);
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    std::FILE* in = std::fopen(p.c_str(), "rb");
+    if (!in) return {};
+    std::string text;
+    char buffer[4096];
+    std::size_t got = 0;
+    while ((got = std::fread(buffer, 1, sizeof buffer, in)) != 0)
+        text.append(buffer, got);
+    std::fclose(in);
+    return text;
 }
 
 pz::fs::path make_temp_root() {
-    auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto stamp = static_cast<unsigned long long>(std::time(nullptr));
     auto root = pz::fs::temp_directory_path() / ("pzmodmgr-test-" + std::to_string(stamp));
     pz::fs::create_directories(root);
     return root;
 }
 
 void make_executable(const pz::fs::path& p) {
-    std::error_code ec;
+    pz::error_code ec;
     pz::fs::permissions(p,
         pz::fs::perms::owner_read | pz::fs::perms::owner_write | pz::fs::perms::owner_exec |
         pz::fs::perms::group_read | pz::fs::perms::group_exec |
@@ -165,7 +171,7 @@ void test_atomic_write(const pz::fs::path& root) {
     check(read_file(file) == "second\n", "atomic write stores the replacement");
 
     bool leftover = false;
-    std::error_code ec;
+    pz::error_code ec;
     for (const auto& entry : pz::fs::directory_iterator(file.parent_path(), ec)) {
         if (entry.path().filename().string().find(".tmp.") != std::string::npos)
             leftover = true;
@@ -187,8 +193,7 @@ void test_cache_cleanup(const pz::fs::path& root) {
     write_file(backups / "old-backup" / "payload", "old");
     write_file(backups / "recent-backup" / "payload", "new");
 
-    const auto stale = pz::fs::file_time_type::clock::now() -
-                       std::chrono::hours(24 * 8);
+    const auto stale = pz::fs::file_time_now() - 24 * 8 * 60 * 60;
     pz::fs::last_write_time(cache / "stale-download", stale);
     pz::fs::last_write_time(backups / "old-backup", stale);
 
@@ -218,8 +223,7 @@ void test_update_cache_cleanup(const pz::fs::path& root) {
     write_file(updates / "old" / "package.zip", "old");
     const auto helper_dir = cfg.data_dir / "update_helper";
     write_file(helper_dir / "pzmodmgr", "old helper");
-    const auto stale = pz::fs::file_time_type::clock::now() -
-                       std::chrono::hours(24 * 8);
+    const auto stale = pz::fs::file_time_now() - 24 * 8 * 60 * 60;
     pz::fs::last_write_time(updates / "0.4.0", stale);
     pz::fs::last_write_time(updates / "old", stale);
 
@@ -254,6 +258,60 @@ void test_external_reload(const pz::fs::path& root) {
               mods[0].folder == "ExternalMod",
           "external mod appears after reload");
     check(!mm.reload_installed(), "unchanged reload reports no change");
+}
+
+void test_native_fs_copy(const pz::fs::path& root) {
+    const pz::fs::path source = root / "fs_copy" / "source";
+    const pz::fs::path dest = root / "fs_copy" / "dest";
+    write_file(source / "a.txt", "alpha");
+    write_file(source / "nested" / "b.txt", "beta");
+    pz::fs::create_directories(dest);
+
+    pz::error_code ec;
+    check(pz::fs::copy_file(source / "a.txt", dest / "a.txt", ec),
+          "copy_file creates the destination");
+    check(!ec && read_file(dest / "a.txt") == "alpha", "copy_file contents");
+    check(!pz::fs::copy_file(source / "a.txt", dest / "a.txt", ec) && ec,
+          "copy_file refuses to overwrite by default");
+    check(pz::fs::copy_file(source / "a.txt", dest / "a.txt",
+                            pz::fs::copy_options::overwrite_existing, ec),
+          "copy_file overwrites when requested");
+
+    check(pz::fs::copy(source, dest / "tree",
+                       pz::fs::copy_options::recursive |
+                           pz::fs::copy_options::overwrite_existing,
+                       ec),
+          "recursive copy");
+    check(!ec && read_file(dest / "tree" / "nested" / "b.txt") == "beta",
+          "recursive copy contents");
+    check(pz::fs::remove_all(dest / "tree", ec) > 0 && !pz::fs::exists(dest / "tree"),
+          "recursive remove");
+}
+
+void test_corrupt_db(const pz::fs::path& root) {
+    pz::Config cfg;
+    cfg.zomboid_dir = root / "corrupt_db" / "Zomboid";
+    cfg.user_mods_dir = cfg.zomboid_dir / "mods";
+    cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
+    cfg.steamcmd_exe = pz::builtin_steamcmd_path(cfg);
+
+    write_file(cfg.data_dir / "installed.tsv",
+               "123\tGood\tGood Mod\t1700000000\n"
+               "oops\tBad\tBad Mod\t1700000000\n"
+               "124\tBad\tBad Mod\tnope\n"
+               "125\tShort\tShort Mod\n"
+               "126\tAdopted\tAdopted Mod\t42\t0\n"
+               "127\tOverflow\tOverflow\t999999999999999999999999999\n");
+
+    pz::ModManager mm(cfg);
+    const auto mods = mm.list();
+    check(mods.size() == 2, "corrupt installed.tsv lines are skipped");
+    check(mods.size() == 2 && mods[0].workshop_id == 123 &&
+              mods[0].time_updated == 1700000000 && mods[0].owned,
+          "valid owned record survives corrupt lines");
+    check(mods.size() == 2 && mods[1].workshop_id == 126 &&
+              mods[1].time_updated == 42 && !mods[1].owned,
+          "adopted record and owned flag survive corrupt lines");
 }
 
 void test_read_mod_info(const pz::fs::path& root) {
@@ -1235,6 +1293,8 @@ int main() {
     test_cache_cleanup(root);
     test_update_cache_cleanup(root);
     test_external_reload(root);
+    test_native_fs_copy(root);
+    test_corrupt_db(root);
     test_read_mod_info(root);
     test_missing_requirements(root);
     test_discover_mod_roots(root);
@@ -1248,7 +1308,7 @@ int main() {
     test_collection_parser();
     test_install_flow(root);
 
-    std::error_code ec;
+    pz::error_code ec;
     pz::fs::remove_all(root, ec);
 
     if (g_failures != 0) {

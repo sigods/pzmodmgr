@@ -2,28 +2,41 @@
 #include "core/mod_info.hpp"
 #include "core/paths.hpp"
 #include "core/steamcmd.hpp"
+#include "core/thread.hpp"
 #include "core/text.hpp"
 #include "core/updater.hpp"
 #include "core/url.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
-#include <chrono>
+#include <cerrno>
 #include <cstddef>
+#include <ctime>
 #include <cstdlib>
-#include <set>
-#include <thread>
 #include <utility>
 
 namespace pz {
 namespace {
+
+// std::stoull pulls the locale/iostream conversion facets into the MinGW
+// static runtime. installed.tsv only contains decimal integers, so parse them
+// with the C helper and reject malformed lines without exceptions.
+bool parse_stored_number(const std::string& text, std::uint64_t& value) {
+    if (text.empty()) return false;
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(text.c_str(), &end, 10);
+    if (errno == ERANGE || end == text.c_str() || *end != '\0') return false;
+    value = static_cast<std::uint64_t>(parsed);
+    return true;
+}
 
 // Moves a downloaded mod into place. The download cache is not kept, so the
 // same files are not stored twice. A rename is atomic on the same filesystem;
 // a copy is only a fallback for a cross-device cache.
 bool move_tree(const fs::path& src, const fs::path& dst) {
     fs::create_directories(dst.parent_path());
-    std::error_code ec;
+    pz::error_code ec;
     fs::rename(src, dst, ec);
     if (!ec) return true;
 
@@ -35,19 +48,19 @@ bool move_tree(const fs::path& src, const fs::path& dst) {
 }
 
 std::string stamp() {
-    return std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    return std::to_string(static_cast<unsigned long long>(std::time(nullptr)));
 }
 
 // Download caches are only needed while an install is running. A crash or a
 // killed steamcmd can leave one behind forever; prune it after a day. Backups
 // are crash-recovery copies, so keep them for a week before reclaiming them.
-void prune_stale_children(const fs::path& dir, std::chrono::hours max_age) {
-    std::error_code ec;
+void prune_stale_children(const fs::path& dir, fs::file_time_type max_age_seconds) {
+    pz::error_code ec;
     fs::directory_iterator entries(dir, ec);
     if (ec) return;
-    const auto cutoff = fs::file_time_type::clock::now() - max_age;
+    const auto cutoff = fs::file_time_now() - max_age_seconds;
     for (const auto& entry : entries) {
-        std::error_code item_ec;
+        pz::error_code item_ec;
         const auto modified = fs::last_write_time(entry.path(), item_ec);
         if (!item_ec && modified < cutoff) fs::remove_all(entry.path(), item_ec);
     }
@@ -55,8 +68,8 @@ void prune_stale_children(const fs::path& dir, std::chrono::hours max_age) {
 }
 
 void prune_stale_state(const fs::path& data_dir) {
-    prune_stale_children(data_dir / "steam_cache", std::chrono::hours(24));
-    prune_stale_children(data_dir / "backups", std::chrono::hours(24 * 7));
+    prune_stale_children(data_dir / "steam_cache", 24 * 60 * 60);
+    prune_stale_children(data_dir / "backups", 7 * 24 * 60 * 60);
 }
 
 std::string read_game_version(const fs::path& zomboid_dir) {
@@ -78,9 +91,7 @@ constexpr std::size_t kRemoteCheckWorkers = 4;
 constexpr std::uint64_t kUpdateCheckIntervalSeconds = 24 * 60 * 60;
 
 std::uint64_t now_seconds() {
-    return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
+    return static_cast<std::uint64_t>(std::time(nullptr));
 }
 
 std::string folded(std::string value) {
@@ -147,23 +158,24 @@ std::vector<std::uint64_t> fetch_remote_times(const std::vector<std::uint64_t>& 
 
     const std::size_t workers = std::min(ids.size(), kRemoteCheckWorkers);
     std::atomic<std::size_t> next{0};
-    std::vector<std::thread> pool;
+    std::vector<thread> pool;
     pool.reserve(workers);
     bool spawn_failed = false;
-    try {
-        for (std::size_t i = 0; i < workers; ++i) {
-            pool.emplace_back([&]() {
-                for (;;) {
-                    const std::size_t index = next.fetch_add(1);
-                    if (index >= ids.size()) break;
-                    times[index] = fetch_remote_time_updated(ids[index]);
-                }
-            });
+    for (std::size_t i = 0; i < workers; ++i) {
+        thread worker([&]() {
+            for (;;) {
+                const std::size_t index = next.fetch_add(1);
+                if (index >= ids.size()) break;
+                times[index] = fetch_remote_time_updated(ids[index]);
+            }
+        });
+        if (!worker.joinable()) {
+            // If a thread cannot be created, finish the remaining lookups here
+            // after joining the workers that did start.
+            spawn_failed = true;
+            break;
         }
-    } catch (...) {
-        // If a thread cannot be created, finish the remaining lookups here
-        // after joining the workers that did start.
-        spawn_failed = true;
+        pool.push_back(std::move(worker));
     }
     for (auto& thread : pool)
         if (thread.joinable()) thread.join();
@@ -203,7 +215,7 @@ Result ModManager::set_zomboid_dir(const fs::path& dir) {
         return {false, "Refusing to use a filesystem root as the Zomboid folder"};
     if (normalized == cfg_.zomboid_dir) return {true, "Zomboid folder unchanged"};
 
-    std::error_code ec;
+    pz::error_code ec;
     fs::create_directories(normalized / "mods", ec);
     if (ec)
         return {false, "Could not create " + (normalized / "mods").string() +
@@ -249,7 +261,7 @@ Result ModManager::remove(std::uint64_t id, const LogFn& log) {
     for (const auto& m : db_) {
         if (m.workshop_id != id) continue;
         if (m.owned) {
-            std::error_code ec;
+            pz::error_code ec;
             fs::remove_all(cfg_.user_mods_dir / m.folder, ec);
             log("removed " + m.folder);
             ++removed;
@@ -408,7 +420,7 @@ bool ModManager::reload_installed() {
     load_db();
     game_version_ = read_game_version(cfg_.zomboid_dir);
 
-    std::set<std::uint64_t> present;
+    pz::flat_set<std::uint64_t> present;
     for (const auto& mod : db_) present.insert(mod.workshop_id);
     for (auto it = updates_.begin(); it != updates_.end();) {
         if (present.count(it->first) == 0) it = updates_.erase(it);
@@ -475,7 +487,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
     // retain a failed or stale item and make later downloads fail with
     // steamcmd's generic "Failure"; a fresh per-item root avoids that state.
     const fs::path cache_dir = cfg_.data_dir / "steam_cache" / std::to_string(id);
-    std::error_code cleanup_ec;
+    pz::error_code cleanup_ec;
     fs::remove_all(cache_dir, cleanup_ec);
     auto dl = steamcmd_download_workshop_item(cfg_, id, cache_dir, log);
     if (!dl.ok) {
@@ -483,7 +495,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         return {false, dl.detail};
     }
     auto cleanup_cache = [&]() {
-        std::error_code ec;
+        pz::error_code ec;
         fs::remove_all(cache_dir, ec);
     };
 
@@ -530,7 +542,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
     std::vector<Moved> moved;
     auto rollback = [&]() {
         for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
-            std::error_code ec;
+            pz::error_code ec;
             if (fs::exists(it->dest)) {
                 move_tree(it->dest, it->source);
                 if (!it->backup.empty()) fs::rename(it->backup, it->dest, ec);
@@ -583,7 +595,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         fs::path backup;
         if (fs::exists(dest)) {   // never silently destroy a manual/local mod
             backup = cfg_.data_dir / "backups" / (folder + "-" + stamp());
-            std::error_code ec;
+            pz::error_code ec;
             fs::create_directories(backup.parent_path());
             fs::rename(dest, backup, ec);
             if (ec) {
@@ -594,7 +606,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         }
 
         if (!move_tree(root, dest)) {
-            std::error_code ec;
+            pz::error_code ec;
             if (!backup.empty() && fs::exists(backup)) {
                 fs::remove_all(dest, ec);
                 fs::rename(backup, dest, ec);
@@ -620,11 +632,11 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
     // and a new version folder with different Mod IDs). Drop folders this
     // manager installed for the item that the current download no longer
     // contains. Folders it only adopted are left alone.
-    std::set<std::string> current;
+    pz::flat_set<std::string> current;
     for (const auto& m : fresh) current.insert(m.folder);
     for (const auto& m : db_) {
         if (m.workshop_id != id || !m.owned || current.count(m.folder) != 0) continue;
-        std::error_code ec;
+        pz::error_code ec;
         fs::remove_all(cfg_.user_mods_dir / m.folder, ec);
         if (ec)
             log("could not remove previous " + m.folder + ": " + ec.message());
@@ -643,10 +655,10 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
     // disk space. A crash leaves the copy in place for manual recovery.
     for (const auto& m : moved) {
         if (m.backup.empty()) continue;
-        std::error_code ec;
+        pz::error_code ec;
         fs::remove_all(m.backup, ec);
     }
-    std::error_code dir_ec;
+    pz::error_code dir_ec;
     fs::remove(cfg_.data_dir / "backups", dir_ec);  // succeeds only when empty
 
     // Opt-in: make a freshly installed item active in the main Mods list. An
@@ -668,8 +680,8 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
 }
 
 std::vector<MissingRequirement> ModManager::missing_requirements() const {
-    std::set<std::string> installed_ids;
-    std::error_code ec;
+    pz::flat_set<std::string> installed_ids;
+    pz::error_code ec;
     fs::directory_iterator mods(cfg_.user_mods_dir, ec);
     if (!ec) {
         for (const auto& entry : mods) {
@@ -680,8 +692,8 @@ std::vector<MissingRequirement> ModManager::missing_requirements() const {
     }
 
     std::vector<MissingRequirement> missing;
-    std::set<std::string> reported;
-    std::set<std::string> seen_folders;
+    pz::flat_set<std::string> reported;
+    pz::flat_set<std::string> seen_folders;
     for (const auto& mod : db_) {
         if (!seen_folders.insert(mod.folder).second) continue;
         auto info = read_mod_info(cfg_.user_mods_dir / mod.folder, game_version_);
@@ -706,7 +718,7 @@ bool ModManager::is_installed(std::uint64_t id) const {
 }
 
 std::vector<std::uint64_t> ModManager::unique_installed_ids() const {
-    std::set<std::uint64_t> seen;
+    pz::flat_set<std::uint64_t> seen;
     std::vector<std::uint64_t> ids;
     for (const auto& m : db_)
         if (seen.insert(m.workshop_id).second) ids.push_back(m.workshop_id);
@@ -726,10 +738,10 @@ std::vector<ActivationTarget> ModManager::activation_targets() const {
 
 std::vector<InstalledMod> ModManager::list_all() const {
     std::vector<InstalledMod> mods = db_;
-    std::set<std::string> known;
+    pz::flat_set<std::string> known;
     for (const auto& mod : db_) known.insert(mod.folder);
 
-    std::error_code ec;
+    pz::error_code ec;
     fs::directory_iterator entries(cfg_.user_mods_dir, ec);
     if (ec) return mods;
     for (const auto& entry : entries) {
@@ -909,9 +921,9 @@ Result ModManager::set_selection_enabled(ActivationKind kind, const std::string&
         };
 
         std::vector<std::string> queue = add_ids;
-        std::set<std::string> visited;
+        pz::flat_set<std::string> visited;
         for (const auto& id : queue) visited.insert(folded(id));
-        std::set<std::string> warned;
+        pz::flat_set<std::string> warned;
         for (std::size_t i = 0; i < queue.size(); ++i) {
             const std::string owner = queue[i];
             const InstalledInfo* entry = find_installed(owner);
@@ -1020,11 +1032,12 @@ void ModManager::load_db() {
     for_each_line(db_path(), [&](const std::string& line) {
         const auto parts = split_fields(line, '\t');
         if (parts.size() < 4) return;
-        try {
-            const bool is_owned = !(parts.size() >= 5 && parts[4] == "0");
-            db_.push_back({std::stoull(parts[0]), parts[1], parts[2],
-                           std::stoull(parts[3]), is_owned});
-        } catch (...) { /* skip corrupt line */ }
+        std::uint64_t workshop_id = 0, time_updated = 0;
+        if (!parse_stored_number(parts[0], workshop_id) ||
+            !parse_stored_number(parts[3], time_updated))
+            return;   // skip corrupt line
+        const bool is_owned = !(parts.size() >= 5 && parts[4] == "0");
+        db_.push_back({workshop_id, parts[1], parts[2], time_updated, is_owned});
     });
 }
 

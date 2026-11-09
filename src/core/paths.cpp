@@ -27,12 +27,10 @@ fs::path home_dir() {
 }
 
 bool is_executable(const fs::path& p) {
-    std::error_code ec;
+    pz::error_code ec;
     if (!fs::is_regular_file(p, ec)) return false;
 #ifndef _WIN32
-    const auto perms = fs::status(p, ec).permissions();
-    const auto exec = fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec;
-    return (perms & exec) != fs::perms::none;
+    return ::access(p.c_str(), X_OK) == 0;
 #else
     return true;
 #endif
@@ -154,7 +152,7 @@ Config default_config() {
     // An installed build gets its config from the installer next to the
     // executable, so no bootstrap files are created in the default Zomboid
     // folder. Source/portable builds without that file keep the old fallback.
-    std::error_code ec;
+    pz::error_code ec;
     const fs::path exe_dir = executable_dir();
     const fs::path installed_config =
         exe_dir.empty() ? fs::path{} : exe_dir / "config.ini";
@@ -222,7 +220,7 @@ bool save_config(const Config& c) {
 }
 
 bool write_text_atomic(const fs::path& file, const std::string& text) {
-    std::error_code ec;
+    pz::error_code ec;
     if (!file.parent_path().empty()) fs::create_directories(file.parent_path(), ec);
     if (ec) return false;
 

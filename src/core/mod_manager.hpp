@@ -1,9 +1,9 @@
 #pragma once
 #include "core/activation.hpp"
+#include "core/flat_map.hpp"
 #include "core/mod_info.hpp"
 #include "core/types.hpp"
 #include <cstdint>
-#include <map>
 #include <vector>
 
 namespace pz {
@@ -79,7 +79,7 @@ private:
     Config cfg_;
     std::string game_version_;
     std::vector<InstalledMod> db_;
-    std::map<std::uint64_t, bool> updates_;
+    pz::flat_map<std::uint64_t, bool> updates_;
     bool app_update_available_ = false;
 
     fs::path db_path() const { return cfg_.data_dir / "installed.tsv"; }

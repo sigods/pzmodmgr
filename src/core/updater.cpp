@@ -1,3 +1,4 @@
+#include "core/flat_map.hpp"
 #include "core/updater.hpp"
 #include "core/paths.hpp"
 #include "core/steamcmd.hpp"
@@ -5,10 +6,8 @@
 #include "core/version.hpp"
 #include <algorithm>
 #include <cctype>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -174,7 +173,7 @@ std::string safe_path_component(const std::string& value) {
 }
 
 std::optional<fs::path> update_root(const fs::path& stage, const std::string& exe_name) {
-    std::error_code ec;
+    pz::error_code ec;
     if (fs::is_regular_file(stage / exe_name, ec)) return stage;
     fs::directory_iterator it(stage, ec);
     if (ec) return std::nullopt;
@@ -195,11 +194,11 @@ unsigned long marker_pid(const fs::path& marker) {
 }
 
 std::string active_staged_update(const fs::path& updates_root) {
-    std::error_code ec;
+    pz::error_code ec;
     fs::directory_iterator entries(updates_root, ec);
     if (ec) return {};
     for (const auto& entry : entries) {
-        std::error_code item_ec;
+        pz::error_code item_ec;
         if (!entry.is_directory(item_ec)) continue;
         const fs::path marker = entry.path() / "pending.txt";
         if (!fs::is_regular_file(marker, item_ec)) continue;
@@ -211,7 +210,7 @@ std::string active_staged_update(const fs::path& updates_root) {
 }
 
 void remove_file(const fs::path& path) {
-    std::error_code ec;
+    pz::error_code ec;
     fs::remove(path, ec);
 }
 
@@ -317,7 +316,7 @@ std::string sha256_hex(const std::string& data) {
 
 void append_update_log(const fs::path& log_path, const std::string& message) {
     if (log_path.empty()) return;
-    std::error_code ec;
+    pz::error_code ec;
     if (!log_path.parent_path().empty())
         fs::create_directories(log_path.parent_path(), ec);
     std::FILE* out = open_append(log_path);
@@ -463,7 +462,7 @@ Result stage_app_update(const Config& cfg, const LogFn& log) {
 
     const fs::path base = updates_root / safe_path_component(update.latest_version);
     const fs::path marker = base / "pending.txt";
-    std::error_code ec;
+    pz::error_code ec;
     fs::remove_all(base, ec);
 
     const fs::path stage = base / "stage";
@@ -570,7 +569,7 @@ void cleanup_update_cache(const Config& cfg) {
     // The detached helper lives next to updates, not inside it, so cleanup can
     // remove completed releases completely. A running helper on Windows may
     // keep this folder for one more launch; it never keeps an update package.
-    std::error_code ec;
+    pz::error_code ec;
     fs::remove_all(cfg.data_dir / "update_helper", ec);
     ec.clear();
 
@@ -579,7 +578,7 @@ void cleanup_update_cache(const Config& cfg) {
     if (ec) return;
 
     for (const auto& entry : entries) {
-        std::error_code item_ec;
+        pz::error_code item_ec;
         if (!entry.is_directory(item_ec)) continue;
 
         // A live pending marker protects the one update the helper is waiting
@@ -612,7 +611,7 @@ bool is_update_helper_invocation(int argc, char** argv) {
 }
 
 int run_update_helper(int argc, char** argv) {
-    std::map<std::string, std::string> options;
+    pz::flat_map<std::string, std::string> options;
     for (int i = 2; i + 1 < argc; i += 2) {
         std::string key = argv[i] ? argv[i] : "";
         if (key.compare(0, 2, "--") != 0) continue;
@@ -634,7 +633,7 @@ int run_update_helper(int argc, char** argv) {
     append_update_log(log_path, "waiting for pzmodmgr to exit");
     wait_for_process(parent_pid);
 
-    std::error_code ec;
+    pz::error_code ec;
     if (!fs::is_directory(stage, ec) || !fs::is_directory(install, ec)) {
         return update_failed(log_path, marker,
                              "The staged update or installation folder disappeared.");
@@ -700,7 +699,7 @@ int run_update_helper(int argc, char** argv) {
 
     fs::rename(new_dir, install, ec);
     if (ec) {
-        std::error_code restore_ec;
+        pz::error_code restore_ec;
         fs::rename(old_dir, install, restore_ec);
         fs::remove_all(new_dir, restore_ec);
         return update_failed(log_path, marker,
@@ -709,7 +708,7 @@ int run_update_helper(int argc, char** argv) {
 
     unsigned long new_pid = 0;
     if (!start_detached_process(install / exe_name, {}, &new_pid)) {
-        std::error_code rollback_ec;
+        pz::error_code rollback_ec;
         fs::rename(install, new_dir, rollback_ec);
         fs::rename(old_dir, install, rollback_ec);
         fs::remove_all(new_dir, rollback_ec);
