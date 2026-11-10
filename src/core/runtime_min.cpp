@@ -45,7 +45,7 @@ void operator delete[](void* memory, const std::nothrow_t&) noexcept {
 // application has exceptions disabled and cannot recover from termination, so
 // abort without the demangler.
 namespace __gnu_cxx {
-[[noreturn]] void __verbose_terminate_handler() { std::abort(); }
+void __verbose_terminate_handler() { std::abort(); }
 }  // namespace __gnu_cxx
 #endif
 
