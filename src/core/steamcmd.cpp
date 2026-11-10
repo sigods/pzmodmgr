@@ -5,7 +5,7 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
-#include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <string_view>
 #ifdef _WIN32
@@ -534,6 +534,19 @@ std::size_t find_key(const std::string& json, std::string_view key,
     return std::string::npos;
 }
 
+bool parse_uint64(const char* first, const char* last, std::uint64_t& value) {
+    if (first == last) return false;
+    std::uint64_t parsed = 0;
+    for (const char* p = first; p != last; ++p) {
+        if (*p < '0' || *p > '9') return false;
+        const std::uint64_t digit = static_cast<std::uint64_t>(*p - '0');
+        if (parsed > (UINT64_MAX - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
+    }
+    value = parsed;
+    return true;
+}
+
 // Reads the unsigned number that follows the key found at pos (": 123").
 bool read_uint_after(const std::string& json, std::size_t pos, std::uint64_t& value) {
     std::size_t i = pos;
@@ -548,11 +561,7 @@ bool read_uint_after(const std::string& json, std::size_t pos, std::uint64_t& va
            std::isdigit(static_cast<unsigned char>(*last))) ++last;
     if (first == last) return false;
 
-    std::uint64_t parsed = 0;
-    const auto r = std::from_chars(first, last, parsed);
-    if (r.ec != std::errc{}) return false;
-    value = parsed;
-    return true;
+    return parse_uint64(first, last, value);
 }
 
 }  // namespace
@@ -668,8 +677,8 @@ std::vector<std::uint64_t> parse_collection_children(const std::string& json) {
                         if (j < json.size()) ++j;
 
                         std::uint64_t value = 0;
-                        auto r = std::from_chars(val.data(), val.data() + val.size(), value);
-                        if (r.ec == std::errc{} && r.ptr == val.data() + val.size() && value != 0)
+                        if (parse_uint64(val.data(), val.data() + val.size(), value) &&
+                            value != 0)
                             ids.push_back(value);
                         i = j;   // skip the value string on the next iteration
                     }

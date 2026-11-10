@@ -577,6 +577,23 @@ void test_ui_helpers() {
     check(visible.size() == 2 && visible[0].workshop_id == 2,
           "UI list sorts by name");
 
+    pz::InstalledMod newer_z;
+    newer_z.workshop_id = 3;
+    newer_z.folder = "Zed";
+    newer_z.name = "Zed";
+    newer_z.time_updated = 20;
+    pz::InstalledMod newer_a;
+    newer_a.workshop_id = 4;
+    newer_a.folder = "Able";
+    newer_a.name = "Able";
+    newer_a.time_updated = 20;
+    visible = pz::visible_mods({beta, newer_z, alpha, newer_a}, "", false, 1,
+        [](std::uint64_t) { return false; });
+    check(visible.size() == 4 && visible[0].workshop_id == 4 &&
+              visible[1].workshop_id == 3 && visible[2].workshop_id == 2 &&
+              visible[3].workshop_id == 1,
+          "UI list sorts by update time, then name");
+
     visible = pz::visible_mods(mods, "", true, 1,
         [](std::uint64_t id) { return id == 1; });
     check(visible.size() == 1 && visible[0].workshop_id == 1,

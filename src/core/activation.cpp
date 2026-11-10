@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <utility>
 
 namespace pz {
 namespace {
@@ -123,6 +124,20 @@ std::string display_name(ActivationKind kind, const std::string& name) {
     if (kind == ActivationKind::Default) return "Default (mods/default.txt)";
     if (kind == ActivationKind::Save) return "Save: " + name;
     return "Server: " + name;
+}
+
+// Save and server lists are small; a stable insertion sort avoids two
+// std::sort instantiations and their heap/insertion helper code.
+void sort_targets(std::vector<ActivationTarget>& targets) {
+    for (std::size_t i = 1; i < targets.size(); ++i) {
+        ActivationTarget value = std::move(targets[i]);
+        std::size_t j = i;
+        while (j > 0 && value.name < targets[j - 1].name) {
+            targets[j] = std::move(targets[j - 1]);
+            --j;
+        }
+        targets[j] = std::move(value);
+    }
 }
 
 }  // namespace
@@ -367,9 +382,7 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
             }
         }
     }
-    std::sort(saves.begin(), saves.end(), [](const ActivationTarget& a, const ActivationTarget& b) {
-        return a.name < b.name;
-    });
+    sort_targets(saves);
     targets.insert(targets.end(), saves.begin(), saves.end());
 
     std::vector<ActivationTarget> servers;
@@ -388,9 +401,7 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
             servers.push_back(std::move(target));
         }
     }
-    std::sort(servers.begin(), servers.end(), [](const ActivationTarget& a, const ActivationTarget& b) {
-        return a.name < b.name;
-    });
+    sort_targets(servers);
     targets.insert(targets.end(), servers.begin(), servers.end());
     return targets;
 }

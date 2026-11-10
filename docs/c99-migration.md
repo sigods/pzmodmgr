@@ -28,6 +28,13 @@ Status after the 0.3.0 native-host reduction and URL C-API pass.
   context, with a small templated constructor for existing lambdas. The
   internal capture sink in `steamcmd.cpp` is a template instead of
   `std::function`.
+- Small-list sorting no longer instantiates `std::sort`/`std::stable_sort`.
+  Mod-info version selection, save/server target ordering, and UI row ordering
+  use local stable insertion sorts. The stripped Linux app fell from 219,288
+  to 207,000 bytes and the native host from 96,408 to 92,312 bytes on the
+  rebased `0.3.0` branch. The UI sort benchmark was unchanged within noise
+  (hyperfine: +1.4% over 20,000 runs). `std::from_chars` was also replaced by
+  bounded decimal parsing in `mod_info.cpp` and `steamcmd.cpp`.
 - The URL parser is a C99 translation unit and the only URL implementation.
   `src/core/mod_manager.cpp`, the browser native host, and the batch command
   parser call the C API directly; tests do the same. The old
@@ -65,6 +72,11 @@ On the unreleased `0.3.0` branch, the native-host-only change lowers that host
 from 125,080 to 96,408 bytes on Linux (-22.9%) and from 318,444 to 286,700 bytes
 on Windows (-9.97%). The unchanged app is still 463,161 bytes stripped and
 208,697 bytes with UPX; the smaller host payload takes the Windows setupfrom 441,582 to 427,758 bytes and the ZIP from 449,983 to 433,732 bytes.
+
+After rebasing onto the 0.2.6 fixes, replacing the small-list sorts reduced the
+stripped Linux app from 219,288 to 207,000 bytes (-5.6%) and the Linux native
+host from 96,408 to 92,312 bytes (-4.3%). No Windows remeasurement has been
+made for this sort change yet.
 
 ## Non-std binary and memory work
 
