@@ -5,10 +5,11 @@
 #include "core/paths.hpp"
 #include "core/steamcmd.hpp"
 #include "core/updater.hpp"
-#include "core/url.hpp"
+#include "core/url_c.h"
 #include "ui/ui.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -62,28 +63,47 @@ void make_executable(const pz::fs::path& p) {
     check(!ec, "make executable: " + p.string());
 }
 
+bool parse_one_workshop_id(const std::string& input, std::uint64_t& id) {
+    return pz_url_parse_workshop_id(input.data(), input.size(), &id) != 0;
+}
+
+std::vector<std::uint64_t> parse_workshop_ids(const std::string& input) {
+    std::vector<std::uint64_t> result;
+    pz_url_ids parsed{};
+    if (!pz_url_parse_workshop_ids(input.data(), input.size(), &parsed)) {
+        pz_url_ids_free(&parsed);
+        return result;
+    }
+    if (parsed.count != 0) result.assign(parsed.items, parsed.items + parsed.count);
+    pz_url_ids_free(&parsed);
+    return result;
+}
+
 void test_parse_workshop_id() {
-    check(pz::parse_workshop_id("123456789").value_or(0) == 123456789, "plain numeric id");
-    check(pz::parse_workshop_id("  42  ").value_or(0) == 42, "numeric id with whitespace");
+    std::uint64_t id = 0;
+    check(parse_one_workshop_id("123456789", id) && id == 123456789,
+          "plain numeric id");
+    check(parse_one_workshop_id("  42  ", id) && id == 42,
+          "numeric id with whitespace");
 
     const char* url = "https://steamcommunity.com/sharedfiles/filedetails/?id=123456789&searchtext=x";
-    check(pz::parse_workshop_id(url).value_or(0) == 123456789, "workshop url");
+    check(parse_one_workshop_id(url, id) && id == 123456789, "workshop url");
     const char* workshop_url =
         "https://steamcommunity.com/workshop/filedetails/?id=3171167894";
-    check(pz::parse_workshop_id(workshop_url).value_or(0) == 3171167894,
+    check(parse_one_workshop_id(workshop_url, id) && id == 3171167894,
           "workshop/filedetails url");
 
-    check(!pz::parse_workshop_id("").has_value(), "empty input rejected");
-    check(!pz::parse_workshop_id("no id here").has_value(), "text without id rejected");
-    check(!pz::parse_workshop_id("id=abc").has_value(), "non-numeric id rejected");
-    check(!pz::parse_workshop_id("123456789012345678901").has_value(), "overlong id rejected");
+    check(!parse_one_workshop_id("", id), "empty input rejected");
+    check(!parse_one_workshop_id("no id here", id), "text without id rejected");
+    check(!parse_one_workshop_id("id=abc", id), "non-numeric id rejected");
+    check(!parse_one_workshop_id("123456789012345678901", id), "overlong id rejected");
 
-    auto multi = pz::parse_workshop_ids(
+    auto multi = parse_workshop_ids(
         "123\t456\nhttps://steamcommunity.com/sharedfiles/filedetails/?id=789 123");
     check(multi.size() == 3 && multi[0] == 123 && multi[1] == 456 && multi[2] == 789,
           "multiple IDs parsed in order and deduplicated");
-    check(pz::parse_workshop_ids("   ").empty(), "empty batch has no IDs");
-    check(pz::parse_workshop_ids("123 not-an-id").empty(),
+    check(parse_workshop_ids("   ").empty(), "empty batch has no IDs");
+    check(parse_workshop_ids("123 not-an-id").empty(),
           "a bad token rejects the whole batch");
 }
 

@@ -53,7 +53,6 @@ add_library(pzcore STATIC
   ${PZMODMGR_FS_SOURCE}
   src/core/activation.cpp
   src/core/url.c
-  src/core/url.cpp
   src/core/steamcmd.cpp
   src/core/mod_info.cpp
   src/core/mod_manager.cpp

@@ -2,7 +2,8 @@
 #include "core/paths.hpp"
 #include "core/text.hpp"
 #include "core/updater.hpp"
-#include "core/url.hpp"
+#include "core/url_c.h"
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -14,6 +15,20 @@ struct BatchCounts {
     int ok = 0;
     int failed = 0;
 };
+
+// The parser is C99; this is the only command-layer copy into the vector used
+// by the existing batch loop.
+std::vector<std::uint64_t> parse_ids(const std::string& input) {
+    std::vector<std::uint64_t> ids;
+    pz_url_ids parsed{};
+    if (!pz_url_parse_workshop_ids(input.data(), input.size(), &parsed)) {
+        pz_url_ids_free(&parsed);
+        return ids;
+    }
+    if (parsed.count != 0) ids.assign(parsed.items, parsed.items + parsed.count);
+    pz_url_ids_free(&parsed);
+    return ids;
+}
 
 template <typename Fn>
 BatchCounts apply_ids(const std::vector<std::uint64_t>& ids, const LogFn& log,
@@ -41,7 +56,7 @@ Result add_workshop_ids(ModManager& mm, const std::vector<std::uint64_t>& ids,
 }
 
 Result add_workshop_input(ModManager& mm, const std::string& arg, const LogFn& log) {
-    auto ids = parse_workshop_ids(arg);
+    auto ids = parse_ids(arg);
     if (ids.empty()) return {false, "No Workshop ID found in: " + arg};
     return add_workshop_ids(mm, ids, log);
 }
@@ -74,7 +89,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
 
     if (cmd == "add") return add_workshop_input(mm, arg, log);
     if (cmd == "remove") {
-        auto ids = parse_workshop_ids(arg);
+        auto ids = parse_ids(arg);
         if (ids.empty()) return {false, "expected a Workshop ID"};
         if (ids.size() == 1) return mm.remove(ids.front(), log);
 
@@ -141,7 +156,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
     }
     if (cmd == "enable" || cmd == "disable") {
         const auto [index_text, ids_text] = split_first_word(arg);
-        auto ids = parse_workshop_ids(ids_text);
+        auto ids = parse_ids(ids_text);
         if (index_text.empty() || ids.empty())
             return {false, "expected: " + cmd + " <target index> <Workshop ID>..."};
         if (index_text.find_first_not_of("0123456789") != std::string::npos)
@@ -175,7 +190,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
     }
     if (cmd == "update") {
         if (arg.empty()) return mm.update_all(log);
-        auto ids = parse_workshop_ids(arg);
+        auto ids = parse_ids(arg);
         if (ids.empty()) return {false, "expected a Workshop ID"};
         if (ids.size() == 1) return mm.update_one(ids.front(), log);
 
@@ -219,7 +234,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
 
     // A pasted Workshop URL, numeric id, or whitespace-separated list with no
     // command prefix means add.
-    auto ids = parse_workshop_ids(line);
+    auto ids = parse_ids(line);
     if (!ids.empty()) return add_workshop_ids(mm, ids, log);
 
     return {false, "unknown command: " + cmd};

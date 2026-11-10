@@ -28,11 +28,11 @@ Status after the 0.3.0 native-host reduction and URL C-API pass.
   context, with a small templated constructor for existing lambdas. The
   internal capture sink in `steamcmd.cpp` is a template instead of
   `std::function`.
-- The URL parser is a C99 translation unit. `src/core/url.c` owns parsing;
-  `src/core/mod_manager.cpp` and the browser native host call the C API
-  directly. `src/core/url.cpp` remains only as the
-  `std::optional`/`std::vector` adapter used by the batch command parser and
-  tests. CMake enables `C` and builds the parser with `C_STANDARD 99`.
+- The URL parser is a C99 translation unit and the only URL implementation.
+  `src/core/mod_manager.cpp`, the browser native host, and the batch command
+  parser call the C API directly; tests do the same. The old
+  `url.cpp`/`url.hpp` adapter has been removed. CMake enables `C` and builds
+  the parser with `C_STANDARD 99`.
 - The browser native host calls `ModManager::add`/`update_one` instead of
   `run_command`, so this add/update-only process no longer links command
   dispatch or the unused update helpers. The stripped host is 96,408 bytes on
@@ -51,7 +51,7 @@ UPX 4.2.4 for both):
 | Windows `pzmodmgr.exe` UPX | 450,755 | 208,697 |
 | Windows native host stripped | 1,270,245 | 286,700 |
 | Windows setup (UPX) | 1,005,399 | 427,758 |
-| Windows ZIP (UPX build) | 1,031,282 | 433,777 |
+| Windows ZIP (UPX build) | 1,031,282 | 433,732 |
 | Linux `pzmodmgr` stripped, dynamic runtime | 338,280 | 334,184 |
 | Linux `pzmodmgr` stripped, self-contained runtime | 338,280 | 215,192 |
 | Linux dynamic `libstdc++` imports | 56 | 0 |
@@ -122,7 +122,7 @@ libstdc++ goal. The codebase already relies on C99-era libc facilities.
 | `std::chrono` | Removed from app code | File timestamps, cache ages, sleeps | `time_t`, `clock_gettime`, `Sleep`/`usleep` |
 | `std::error_code` | Removed | Every filesystem failure path | `pz::error_code` with `strerror`/`FormatMessageA` |
 | `std::wstring` | 54 refs / 5 files | Windows UI and Win32 boundary | UTF-16 buffer/array; keep UTF-8 as the stored form |
-| `std::string_view`, `std::from_chars` | URL adapter, steamcmd, mod.info | C++17 parsing helpers | pointer + length and manual decimal parsing |
+| `std::string_view`, `std::from_chars` | steamcmd, mod.info | C++17 parsing helpers | pointer + length and manual decimal parsing |
 | C++ language features | `auto`, lambdas, templates, classes, overloads | C has no equivalents | explicit types, functions with context structs, manual dispatch |
 
 The application does not use iostreams, regular expressions, RTTI,
@@ -138,7 +138,7 @@ into abort paths instead of pulling in the C++ unwinder.
   containers, lambdas, threads, `std::wstring`, and callbacks.
 - Core orchestration: `mod_manager.cpp` (1,062), `updater.cpp` (736), and
   `steamcmd.cpp` (703) hold most of the string/vector/map/error-code surface.
-- Leaf code is already close to C in shape: `url.cpp`, `mod_info.cpp`,
+- Leaf code is already close to C in shape: `url.c`, `mod_info.cpp`,
   `paths.cpp`, `activation.cpp`, the SHA-256/JSON helpers, and `fs_posix.cpp`.
 - Third-party `stb_image.h`, Xlib, and Win32 are C APIs. They do not require a
   C++ runtime.
