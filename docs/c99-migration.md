@@ -45,7 +45,7 @@ Status after the 0.3.0 Windows static-runtime pass and the C99 native-host rewri
   the sibling `pzmodmgr` executable, runs the normal `add`/`update` CLI, captures
   its output, and returns the same framed JSON. It links only `url.c` and the C
   runtime; it does not link `pzcore` or any C++ runtime. The stripped host is
-  10,160 bytes on Linux and 48,728 on Windows.
+  10,160 bytes on Linux and 46,080 on Windows.
 - Linux executables are linked with the static libstdc++ and libgcc runtimes,
   so the shipped binaries have no external C++ runtime dependency. This is a
   runtime milestone, not a source-level C99 conversion: the binary still
@@ -80,8 +80,8 @@ included in these comparisons.
 
 | Artifact | Before | After | Change |
 | --- | ---: | ---: | ---: |
-| Windows `pzmodmgr.exe` | 450,328 | **365,718** | -84,610 (-18.8%) |
-| Windows native host | 281,068 | **48,728** | -232,340 (-82.7%) |
+| Windows `pzmodmgr.exe` | 450,328 | **310,272** | -140,056 (-31.1%) |
+| Windows native host | 281,068 | **46,080** | -234,988 (-83.6%) |
 | Linux `pzmodmgr` | 194,560 | **194,560** | unchanged |
 | Linux native host | 79,872 | **10,160** | -69,712 (-87.3%) |
 
@@ -93,6 +93,7 @@ Each Windows change was measured separately:
 | Replace `snprintf` hex/decimal formatting | 391,448 | 391,960 | 221,676 | 196,520 |
 | Replace the last `fprintf` in CLI output | 391,960 | **365,718** | 196,520 | **196,520** |
 | C99 native host, no `pzcore` link | 365,718 | **365,718** | 196,520 | **48,728** |
+| Strip-all overlay + five-frame ICO + LTO | 365,718 | **310,272** | 48,728 | **46,080** |
 
 The app temporarily grew by 512 bytes when `snprintf` was removed because
 `main.cpp` still called `fprintf`; replacing that final formatted write removed
@@ -139,8 +140,8 @@ What was tried and rejected:
   ASLR; not used.
 - `-fno-threadsafe-statics` saved only 479 bytes (the UI statics are already
   single-threaded), not enough to justify the weaker guarantee.
-- LTO remains unusable on MinGW GCC 15.2: it reproduces the
-  `binds_to_current_def_p` ICE in `selected_ids`.
+- LTO originally hit the `binds_to_current_def_p` ICE on MinGW GCC 15.2; the
+  single-partition workaround below makes it usable.
 
 ### PE overlay and icon follow-up
 
@@ -173,9 +174,29 @@ only saved 402 bytes, so it was rejected.
 The rebuilt baseline is 367,287 rather than the earlier 365,718 because the
 COFF symbol table includes build paths; `strip --strip-all` makes the result
 independent of them. Dropping the 256 pixel frame alone took the app from
-344,576 to 328,192 bytes. The final no-UPX package is 695,296 bytes for the
-setup and 258,948 bytes for the ZIP, against 807,089 and 323,540 before the
+344,576 to 328,192 bytes. Before LTO, the no-UPX package was 695,296 bytes for
+the setup and 258,948 bytes for the ZIP, against 807,089 and 323,540 before the
 pass.
+
+### MinGW LTO ICE fix
+
+The MinGW GCC 15.2 linker ICE (`binds_to_current_def_p`) only occurs with the
+default parallel LTO partitioning. Linking with `-flto=1 -flto-partition=one`
+lets full LTO optimize the UI, including `selected_ids`, without excluding it.
+CMake now enables LTO by default on MinGW and appends those options to every
+LTO target. This is a compiler workaround, not a feature or safety change.
+
+| Section/group | Before LTO | After LTO | Change |
+| --- | ---: | ---: | ---: |
+| `.text` | 256,624 | 241,920 | -14,704 |
+| read-only data (`.rdata`) | 23,768 | 20,696 | -3,072 |
+| resources (`.rsrc`) | 16,096 | 16,096 | 0 |
+| unwind/SEH | 15,088 | 15,088 | 0 |
+| headers/padding | 3,496 | 3,376 | -120 |
+| **Windows app file** | **328,192** | **310,272** | **-17,920 (-5.5%)** |
+
+The native host stays at 46,080 bytes. With LTO the no-UPX setup is 677,376
+bytes and the ZIP is 252,383.
 
 ## LodePNG evaluation
 
@@ -201,11 +222,10 @@ stb_image remains.
 
 The final pass removed costs outside the container/runtime surface:
 
-- **LTO on Linux** replaces the previous non-LTO link and takes the stripped
-  binary from 243,976 to 215,192 bytes. It is enabled by default for Release
-  when the compiler supports it. MinGW GCC 15.2 has a reproducible LTO ICE in
-  `binds_to_current_def_p()` on this UI, so the default is automatically off for
-  MinGW; `PZMODMGR_LTO=ON` can be tried once that toolchain bug is fixed.
+- **LTO on Linux and MinGW** replaces the previous non-LTO links. On Linux the
+  stripped binary goes from 243,976 to 215,192 bytes; on MinGW the app goes from
+  328,192 to 310,272 after the single-partition ICE workaround. LTO is enabled
+  by default for Release when the compiler supports it.
 - **Only Xlib is linked on Linux.** The old `X11_LIBRARIES` line made SM, ICE,
   and Xext direct dependencies even though no symbol was used. The binary now
   has only `libX11`, `libm`, and `libc` as direct dependencies, so the loader no

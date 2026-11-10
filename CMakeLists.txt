@@ -134,12 +134,10 @@ else()
 endif()
 
 # Link-time optimization. Keep it opt-out for reproducible size comparisons.
-# MinGW GCC 15.2 has a reproducible LTO ICE in binds_to_current_def_p() when
-# optimizing this UI, so its default is off there; Linux GCC/Clang use it.
+# MinGW GCC 15.2 ICEs in binds_to_current_def_p() with the default parallel
+# partitioning; the single-partition link below avoids the compiler bug, so
+# LTO is enabled by default on MinGW too.
 set(PZMODMGR_LTO_DEFAULT ON)
-if(MINGW AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-  set(PZMODMGR_LTO_DEFAULT OFF)
-endif()
 option(PZMODMGR_LTO "Use LTO for release builds" ${PZMODMGR_LTO_DEFAULT})
 if(PZMODMGR_LTO AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   include(CheckIPOSupported)
@@ -152,6 +150,12 @@ if(PZMODMGR_LTO AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endif()
     foreach(target IN LISTS PZMODMGR_LTO_TARGETS)
       set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+      if(MINGW AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        # GCC 15.2's MinGW LTO ICEs in binds_to_current_def_p() when the
+        # default parallel partitioning is used. One partition avoids the
+        # compiler bug and still gives the size win.
+        target_link_options(${target} PRIVATE -flto=1 -flto-partition=one)
+      endif()
     endforeach()
   else()
     message(STATUS "LTO unavailable: ${PZMODMGR_IPO_ERROR}")
