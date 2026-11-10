@@ -120,6 +120,10 @@ Releases are published by `.github/workflows/release.yml`. Push a `v*` tag that
 matches the CMake project version; the workflow builds and attaches the Linux
 `.sh`/`.tar.gz` and Windows `.zip`/setup artifacts plus `SHA256SUMS`.
 
+To publish a pre-release without making it the updater's latest release, set the
+repository variable `PRERELEASE=true` before pushing the tag and clear it after
+the workflow. GitHub's `/releases/latest` endpoint excludes pre-releases.
+
 The release archive is checked against GitHub's SHA-256 digest when one is
 available. A detached helper then waits for pzmodmgr to close, swaps the whole
 installation folder, keeps `config.ini` and uninstall metadata, and restarts
@@ -130,7 +134,7 @@ Linux distribution (single self-extracting `.sh` with a `.desktop` entry):
 
 ```bash
 ./scripts/package_linux.sh
-./dist/PZModManager-0.2.7-linux-x86_64.sh
+./dist/PZModManager-0.3.0-linux-x86_64.sh
 ```
 
 GCC/Clang Release builds (Linux and the MinGW Windows build) default to size

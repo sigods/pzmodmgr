@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PRERELEASE: ${{ vars.PRERELEASE }}
+
 jobs:
   linux:
     runs-on: ubuntu-22.04
@@ -132,6 +135,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/* \
+          prerelease=""
+          if [ "$PRERELEASE" = "true" ]; then
+            prerelease="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" release/* $prerelease \
             --title "PZ Mod Manager ${GITHUB_REF_NAME#v}" \
             --generate-notes

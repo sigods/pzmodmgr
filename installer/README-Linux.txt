@@ -1,4 +1,4 @@
-PZ Mod Manager 0.2.6 for Linux
+PZ Mod Manager 0.3.0 for Linux
 ==============================
 
 PZ Mod Manager installs Project Zomboid Steam Workshop items and collections
@@ -13,7 +13,7 @@ Install
 -------
 Run the self-contained installer:
 
-    sh PZModManager-0.2.6-linux-x86_64.sh
+    sh PZModManager-0.3.0-linux-x86_64.sh
 
 It installs for the current user (no sudo) into:
 
