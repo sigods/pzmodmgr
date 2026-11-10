@@ -275,6 +275,16 @@ static int run_cli_w(const wchar_t* exe, const wchar_t* verb,
     return 1;
 }
 
+static int join_exe_path(wchar_t* out, size_t cap, const wchar_t* dir) {
+    static const wchar_t kName[] = L"\\pzmodmgr.exe";
+    const size_t dir_len = wcslen(dir);
+    const size_t name_len = sizeof kName / sizeof kName[0] - 1;
+    if (dir_len + name_len + 1 > cap) return 0;
+    memcpy(out, dir, dir_len * sizeof *out);
+    memcpy(out + dir_len, kName, (name_len + 1) * sizeof *out);
+    return 1;
+}
+
 static int run_cli_arg(const char* verb, const char* arg, CommandResult* result) {
     wchar_t exe_dir[32768];
     wchar_t exe[32768];
@@ -282,9 +292,8 @@ static int run_cli_arg(const char* verb, const char* arg, CommandResult* result)
     wchar_t arg_w[8192];
     if (!executable_dir_w(exe_dir, sizeof exe_dir / sizeof exe_dir[0]) ||
         !widen(verb, verb_w, sizeof verb_w / sizeof verb_w[0]) ||
-        !widen(arg, arg_w, sizeof arg_w / sizeof arg_w[0]))
-        return 0;
-    if (swprintf(exe, sizeof exe / sizeof exe[0], L"%ls\\pzmodmgr.exe", exe_dir) < 0)
+        !widen(arg, arg_w, sizeof arg_w / sizeof arg_w[0]) ||
+        !join_exe_path(exe, sizeof exe / sizeof exe[0], exe_dir))
         return 0;
     return run_cli_w(exe, verb_w, arg_w, result);
 }

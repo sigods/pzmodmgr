@@ -45,7 +45,7 @@ Status after the 0.3.0 Windows static-runtime pass and the C99 native-host rewri
   the sibling `pzmodmgr` executable, runs the normal `add`/`update` CLI, captures
   its output, and returns the same framed JSON. It links only `url.c` and the C
   runtime; it does not link `pzcore` or any C++ runtime. The stripped host is
-  10,160 bytes on Linux and 46,080 on Windows.
+  10,160 bytes on Linux and 19,456 on Windows after the path-join fix below.
 - Linux executables are linked with the static libstdc++ and libgcc runtimes,
   so the shipped binaries have no external C++ runtime dependency. This is a
   runtime milestone, not a source-level C99 conversion: the binary still
@@ -81,7 +81,7 @@ included in these comparisons.
 | Artifact | Before | After | Change |
 | --- | ---: | ---: | ---: |
 | Windows `pzmodmgr.exe` | 450,328 | **310,272** | -140,056 (-31.1%) |
-| Windows native host | 281,068 | **46,080** | -234,988 (-83.6%) |
+| Windows native host | 281,068 | **19,456** | -261,612 (-93.1%) |
 | Linux `pzmodmgr` | 194,560 | **194,560** | unchanged |
 | Linux native host | 79,872 | **10,160** | -69,712 (-87.3%) |
 
@@ -94,11 +94,13 @@ Each Windows change was measured separately:
 | Replace the last `fprintf` in CLI output | 391,960 | **365,718** | 196,520 | **196,520** |
 | C99 native host, no `pzcore` link | 365,718 | **365,718** | 196,520 | **48,728** |
 | Strip-all overlay + five-frame ICO + LTO | 365,718 | **310,272** | 48,728 | **46,080** |
+| Native-host path join without `swprintf` | 310,272 | **310,272** | 46,080 | **19,456** |
 
 The app temporarily grew by 512 bytes when `snprintf` was removed because
 `main.cpp` still called `fprintf`; replacing that final formatted write removed
-MinGW's `__mingw_pformat`/`gdtoa` chain from the app as well. The host had no
-`fprintf`, so it dropped 25,156 bytes at the `snprintf` step.
+MinGW's `__mingw_pformat`/`gdtoa` chain from the app as well. The host source had
+no `fprintf`, so it dropped 25,156 bytes at the `snprintf` step. A later
+`swprintf` removal cut the host to 19,456 bytes.
 
 ### Section comparison
 
@@ -148,8 +150,8 @@ What was tried and rejected:
 A later pass found that `strip --strip-unneeded` left a 252-entry COFF symbol
 table after the last PE section. It is a 9,399-byte overlay with no runtime
 value, and its size changes with build paths. Switching the Windows packaging
-script to `strip --strip-all` removes it. The native host also drops from
-48,728 to 46,080 bytes.
+script to `strip --strip-all` removes it. At that stage the native host also
+drops from 48,728 to 46,080 bytes.
 
 The nine-frame ICO was reduced to the five sizes used by normal Explorer and
 desktop layouts: 16, 24, 32, 48, and 64 pixels. The 20, 40, 128, and 256 pixel
@@ -195,8 +197,44 @@ LTO target. This is a compiler workaround, not a feature or safety change.
 | headers/padding | 3,496 | 3,376 | -120 |
 | **Windows app file** | **328,192** | **310,272** | **-17,920 (-5.5%)** |
 
-The native host stays at 46,080 bytes. With LTO the no-UPX setup is 677,376
-bytes and the ZIP is 252,383.
+The native host is 19,456 bytes with this LTO build; the source-level path-join
+fix below accounts for its reduction. With that host, the no-UPX setup is
+650,752 bytes and the ZIP is 237,273.
+
+### Native host path join
+
+The Windows host built its sibling executable path with
+`swprintf(..., L"%ls\\pzmodmgr.exe", exe_dir)`. That one call pulled in
+MinGW's `__mingw_wpformat` (3,104 bytes), the gdtoa float-conversion chain
+(roughly 3.5 KB), and extra msvcrt imports such as `fwprintf`, `fputwc` and
+`localeconv`. Replacing it with `wcslen` and `memcpy` keeps the same path but
+drops the formatter and its conversion runtime.
+
+| Section/group | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `.text` | 34,928 | 10,464 | -24,464 |
+| `.rdata` | 2,696 | 1,672 | -1,024 |
+| unwind/SEH (`.pdata`+`.xdata`) | 2,048 | 948 | -1,100 |
+| imports/dynamic tables (`.idata`) | 2,420 | 2,068 | -352 |
+| other (`.data`, `.reloc`) | 224 | 168 | -56 |
+| headers/alignment | 3,748 | 4,120 | +372 |
+| **Windows native host file** | **46,080** | **19,456** | **-26,624 (-57.8%)** |
+
+The stripped host is 19,456 bytes both with and without LTO, so LTO adds no
+benefit here. Linux is 10,160 bytes; Windows is still about 1.9x larger because
+of PE headers and alignment, the import table, unwind metadata, and the
+`CreateProcessW`/wide-path code that replaces Linux's `popen` call.
+
+A custom `-nostartfiles` entry was also prototyped. With a `mainCRTStartup`
+that calls the renamed host main and `ExitProcess`, the host measured 9,728
+bytes (slightly below Linux). That removes `__tmainCRTStartup` (1,024),
+`_pei386_runtime_relocator` (912), `_gnu_exception_handler` (464),
+`__mingw_TLScallback` (272), and `__main` (32), along with their imports and
+unwind data. It handled a framed request under Wine, including the sibling
+`CreateProcessW` launch. It is not shipped: it skips CRT argv, TLS, `atexit`,
+and SEH setup, was only validated under Wine, and would break if the host later
+uses a CRT feature that expects that initialization. It needs a real Windows
+test before it can be considered.
 
 ## LodePNG evaluation
 
