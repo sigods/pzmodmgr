@@ -81,7 +81,7 @@ struct Palette {
 
 enum class Btn {
     Nothing, Install, Settings, Update, Remove, UpdateAll, SelectAll, Clear, Copy,
-    Save, Cancel, Theme, FilterAll, FilterUpdates, Sort, Check, Enable,
+    Lock, Save, Cancel, Theme, FilterAll, FilterUpdates, Sort, Check, Enable,
     ShareServer, SelfUpdate, EnableTarget, DisableTarget, ShareTargets, CopyNames,
     CloseTargets
 };
@@ -583,6 +583,7 @@ int run_ui(ModManager& mm) {
         case Btn::Settings: return {800, 24, 96, 30};
         case Btn::SelectAll: return {24, kActionY, 116, kActionH};
         case Btn::Clear: return {148, kActionY, 116, kActionH};
+        case Btn::Lock: return {272, kActionY, 108, kActionH};
         case Btn::Copy: return {392, kActionY, 104, kActionH};
         case Btn::Update: return {506, kActionY, 120, kActionH};
         case Btn::UpdateAll: return {636, kActionY, 120, kActionH};
@@ -619,6 +620,7 @@ int run_ui(ModManager& mm) {
         case Btn::SelfUpdate: return app_update_available;
         case Btn::Update:
         case Btn::Remove:
+        case Btn::Lock:
         case Btn::Copy: return !selected_ids.empty();
         case Btn::Enable:
         case Btn::Clear: return selected_any();
@@ -641,6 +643,12 @@ int run_ui(ModManager& mm) {
         case Btn::SelectAll: return "Select all";
         case Btn::Clear: return "Deselect";
         case Btn::Copy: return "Copy IDs";
+        case Btn::Lock: {
+            bool all_locked = !selected_ids.empty();
+            for (auto id : selected_ids)
+                if (!mm.manually_locked(id)) { all_locked = false; break; }
+            return all_locked ? "Unlock" : "Lock";
+        }
         case Btn::Enable: return "Enable...";
         case Btn::ShareServer: return "Share server";
         case Btn::SelfUpdate: return "Update app";
@@ -685,7 +693,7 @@ int run_ui(ModManager& mm) {
         }
         for (Btn b : {Btn::Install, Btn::ShareServer, Btn::SelfUpdate, Btn::Enable,
                       Btn::Settings, Btn::Update, Btn::Remove, Btn::UpdateAll,
-                      Btn::SelectAll, Btn::Clear, Btn::Copy, Btn::FilterAll,
+                      Btn::SelectAll, Btn::Clear, Btn::Lock, Btn::Copy, Btn::FilterAll,
                       Btn::FilterUpdates, Btn::Sort, Btn::Check}) {
             if (!button_enabled(b)) continue;
             Rect r = button_rect(b);
@@ -742,6 +750,7 @@ int run_ui(ModManager& mm) {
         const std::string label = button_label(b);
         const bool show_icon = b != Btn::Settings && b != Btn::Check &&
                                b != Btn::Theme && b != Btn::Enable &&
+                               b != Btn::Lock &&
                                b != Btn::ShareServer && b != Btn::SelfUpdate &&
                                b != Btn::EnableTarget && b != Btn::DisableTarget &&
                                b != Btn::CloseTargets &&
@@ -816,6 +825,7 @@ int run_ui(ModManager& mm) {
     auto rebuild_visible = [&]() {
         visible = visible_mods(mm.list_all(), filter_text, only_updates, sort_mode,
             [&](std::uint64_t id) { return mm.update_available(id); });
+        for (auto& row : visible) row.locked = mm.locked(row.workshop_id);
         activation = mm.activation_targets();
         row_mod_ids.clear();
         row_enabled.clear();
@@ -1356,7 +1366,9 @@ int run_ui(ModManager& mm) {
             redraw();
             return;
         }
-        std::string line = "add " + input;
+        const bool lock_command = input.compare(0, 5, "lock ") == 0 ||
+                                  input.compare(0, 7, "unlock ") == 0;
+        std::string line = lock_command ? input : "add " + input;
         input.clear();
         start_command(line);
     };
@@ -1377,7 +1389,7 @@ int run_ui(ModManager& mm) {
             push("Could not take clipboard ownership.");
         } else {
             push("Copied " + std::to_string(ids.size()) +
-                 " Workshop ID(s). Paste them into another pzmodmgr.");
+                 " Workshop ID(s). Paste them into Add, or type lock first.");
         }
         redraw();
     };
@@ -1457,7 +1469,8 @@ int run_ui(ModManager& mm) {
         } else {
             const auto missing = mm.unmapped_mod_ids(target);
             std::string message = "Copied " + std::to_string(ids.size()) +
-                                  " Workshop ID(s) from " + activation_name(target) + ".";
+                                  " Workshop ID(s) from " + activation_name(target) +
+                                  ". Paste into Add, or type lock first to pin them.";
             if (!missing.empty())
                 message += " " + std::to_string(missing.size()) +
                            " enabled Mod ID(s) have no installed Workshop ID; use Copy names.";
@@ -1930,6 +1943,13 @@ int run_ui(ModManager& mm) {
                     clear_all();
                     confirm_remove = false;
                     redraw();
+                    break;
+                }
+                if (b == Btn::Lock) {
+                    bool all_locked = !selected_ids.empty();
+                    for (auto id : selected_ids)
+                        if (!mm.manually_locked(id)) { all_locked = false; break; }
+                    start_command(build_command(all_locked ? "unlock" : "lock", selected_ids));
                     break;
                 }
                 if (b == Btn::Copy) {

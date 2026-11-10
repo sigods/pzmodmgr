@@ -144,7 +144,7 @@ bool same_mods(const std::vector<InstalledMod>& a,
             a[i].folder != b[i].folder ||
             a[i].name != b[i].name ||
             a[i].time_updated != b[i].time_updated ||
-            a[i].owned != b[i].owned) return false;
+            a[i].owned != b[i].owned || a[i].locked != b[i].locked) return false;
     }
     return true;
 }
@@ -327,6 +327,9 @@ Result ModManager::disable_mod_ids(const std::vector<std::string>& mod_ids,
 
 Result ModManager::update_one(std::uint64_t id, const LogFn& log) {
     if (!is_installed(id)) return {false, "Not installed: " + std::to_string(id)};
+    if (locked(id))
+        return {true, "Locked (" + lock_reason(id) + "); skipped update of " +
+                      std::to_string(id)};
     auto remote = fetch_remote_time_updated(id);
     if (remote == 0) return {false, "Update check failed: " + std::to_string(id)};
     if (remote <= recorded_time(id)) {
@@ -345,7 +348,19 @@ Result ModManager::update_one(std::uint64_t id, const LogFn& log) {
 }
 
 Result ModManager::update_all(const LogFn& log) {
-    const auto ids = unique_installed_ids();
+    const auto all_ids = unique_installed_ids();
+    const auto server_locks = server_locked_ids();
+    std::vector<std::uint64_t> ids;
+    ids.reserve(all_ids.size());
+    int locked_skipped = 0;
+    for (auto id : all_ids) {
+        if (manually_locked(id) || is_locked_in(server_locks, id)) {
+            log("locked: " + std::to_string(id) + " (skipped)");
+            ++locked_skipped;
+            continue;
+        }
+        ids.push_back(id);
+    }
     const auto remote_times = fetch_remote_times(ids);
     int updated = 0;
     int skipped = 0;
@@ -382,12 +397,15 @@ Result ModManager::update_all(const LogFn& log) {
     save_update_state();
     std::string msg = "Updated " + std::to_string(updated) + " mod item(s)";
     if (unchanged != 0) msg += ", " + std::to_string(unchanged) + " unchanged";
+    if (locked_skipped != 0)
+        msg += ", skipped " + std::to_string(locked_skipped) + " locked";
     if (skipped != 0) msg += ", skipped " + std::to_string(skipped) + " (update check failed)";
     return {true, msg};
 }
 
 Result ModManager::check_updates(const LogFn& log) {
     const auto ids = unique_installed_ids();
+    const auto server_locks = server_locked_ids();
     const auto remote_times = fetch_remote_times(ids);
     int checked = 0, available = 0, failed = 0;
     for (std::size_t i = 0; i < ids.size(); ++i) {
@@ -403,7 +421,9 @@ Result ModManager::check_updates(const LogFn& log) {
         updates_[id] = has_update;
         if (has_update) {
             ++available;
-            log("update available: " + std::to_string(id));
+            const bool is_locked = manually_locked(id) || is_locked_in(server_locks, id);
+            log("update available" + std::string(is_locked ? " (locked): " : ": ") +
+                std::to_string(id));
         } else {
             log("up to date: " + std::to_string(id));
         }
@@ -436,6 +456,76 @@ Result ModManager::check_app_release(const LogFn& log) {
 bool ModManager::update_available(std::uint64_t workshop_id) const {
     auto it = updates_.find(workshop_id);
     return it != updates_.end() && it->second;
+}
+
+bool ModManager::manually_locked(std::uint64_t workshop_id) const {
+    return std::any_of(db_.begin(), db_.end(), [workshop_id](const InstalledMod& m) {
+        return m.workshop_id == workshop_id && m.locked;
+    });
+}
+
+bool ModManager::is_locked_in(const std::vector<std::uint64_t>& ids,
+                              std::uint64_t workshop_id) const {
+    return std::find(ids.begin(), ids.end(), workshop_id) != ids.end();
+}
+
+std::vector<std::uint64_t> ModManager::server_locked_ids() const {
+    std::vector<std::uint64_t> ids;
+    for (const auto& target : activation_targets()) {
+        if (target.kind != ActivationKind::Server) continue;
+        // Only Mods= is enabled. WorkshopItems= may also list optional items,
+        // so it is not used to decide what a server has actually enabled.
+        for (const auto& mod : db_) {
+            auto info = read_mod_info(cfg_.user_mods_dir / mod.folder, game_version_);
+            if (!info || info->id.empty()) continue;
+            if (std::find(target.mod_ids.begin(), target.mod_ids.end(), info->id) !=
+                target.mod_ids.end())
+                add_unique(ids, mod.workshop_id);
+        }
+    }
+    return ids;
+}
+
+bool ModManager::server_locked(std::uint64_t workshop_id) const {
+    return is_locked_in(server_locked_ids(), workshop_id);
+}
+
+bool ModManager::locked(std::uint64_t workshop_id) const {
+    return manually_locked(workshop_id) || server_locked(workshop_id);
+}
+
+std::string ModManager::lock_reason(std::uint64_t workshop_id) const {
+    if (manually_locked(workshop_id)) return "pinned";
+    if (server_locked(workshop_id)) return "server-enabled";
+    return {};
+}
+
+Result ModManager::set_locked(const std::vector<std::uint64_t>& workshop_ids,
+                              bool lock_value, const LogFn& log) {
+    (void)log;
+    int changed = 0;
+    int matched = 0;
+    int missing = 0;
+    for (auto id : workshop_ids) {
+        bool found = false;
+        for (auto& mod : db_) {
+            if (mod.workshop_id != id) continue;
+            found = true;
+            ++matched;
+            if (mod.locked != lock_value) {
+                mod.locked = lock_value;
+                ++changed;
+            }
+        }
+        if (!found) ++missing;
+    }
+    if (changed != 0) save_db();
+    const char* verb = lock_value ? "locked" : "unlocked";
+    std::string msg = std::string(verb) + " " + std::to_string(matched) +
+                      " mod folder(s)";
+    if (missing != 0)
+        msg += ", " + std::to_string(missing) + " Workshop item(s) not installed";
+    return {missing == 0, msg};
 }
 
 bool ModManager::update_check_due() const {
@@ -487,10 +577,16 @@ Result ModManager::install_collection(std::uint64_t collection_id,
         std::to_string(children.size()) + " item(s)");
 
     const auto remote_times = fetch_remote_times(children);
+    const auto server_locks = server_locked_ids();
     int installed = 0, updated = 0, skipped = 0, failed = 0;
     for (std::size_t i = 0; i < children.size(); ++i) {
         const auto child = children[i];
         const bool present = is_installed(child);
+        if (present && (manually_locked(child) || is_locked_in(server_locks, child))) {
+            log("locked: " + std::to_string(child) + " (skipped)");
+            ++skipped;
+            continue;
+        }
         const auto remote = remote_times[i];
         if (remote == 0) {
             log("update check failed: " + std::to_string(child) + " (skipped)");
@@ -616,10 +712,12 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         fs::path dest = cfg_.user_mods_dir / folder;
         bool tracked = false;
         bool was_owned = false;
+        bool was_locked = false;
         for (const auto& m : db_) {
             if (m.workshop_id == id && m.folder == folder) {
                 tracked = true;
                 was_owned = m.owned;
+                was_locked = m.locked;
                 break;
             }
         }
@@ -638,7 +736,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
             log("kept existing " + folder + " (version " + info->mod_version + ")");
             if (!tracked) adopted_external = true;
             fresh.push_back({id, folder, info->name.empty() ? folder : info->name,
-                             remote_time, was_owned});
+                             remote_time, was_owned, was_locked});
             ++kept;
             continue;
         }
@@ -669,7 +767,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         replaced_any = true;
         log("installed " + folder + " (moved from download cache)");
         fresh.push_back({id, folder, info->name.empty() ? folder : info->name,
-                         remote_time, true});
+                         remote_time, true, was_locked});
     }
     if (fresh.empty()) {
         cleanup_cache();
@@ -1095,7 +1193,9 @@ void ModManager::load_db() {
             !parse_stored_number(parts[3], time_updated))
             return;   // skip corrupt line
         const bool is_owned = !(parts.size() >= 5 && parts[4] == "0");
-        db_.push_back({workshop_id, parts[1], parts[2], time_updated, is_owned});
+        const bool is_locked = parts.size() >= 6 && parts[5] != "0";
+        db_.push_back({workshop_id, parts[1], parts[2], time_updated, is_owned,
+                       is_locked});
     });
 }
 
@@ -1123,6 +1223,8 @@ void ModManager::save_db() const {
         text += std::to_string(m.time_updated);
         text += '\t';
         text += m.owned ? '1' : '0';
+        text += '\t';
+        text += m.locked ? '1' : '0';
         text += '\n';
     }
     write_text_atomic(db_path(), text);

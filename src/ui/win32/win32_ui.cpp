@@ -25,6 +25,7 @@ constexpr int ID_SELECT_ALL = 109, ID_CLEAR = 110;
 constexpr int ID_FILTER = 111, ID_FILTER_ALL = 112, ID_FILTER_UPDATES = 113;
 constexpr int ID_SORT = 114, ID_CHECK = 115, ID_COPY = 116, ID_ENABLE = 117;
 constexpr int ID_SHARE_SERVER = 118, ID_SELF_UPDATE = 119, ID_FILTER_CLEAR = 120;
+constexpr int ID_LOCK = 121;
 constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_THEME = 203, ID_SET_AUTO = 204;
 constexpr int ID_TGT_LIST = 301, ID_TGT_ENABLE = 302, ID_TGT_DISABLE = 303;
 constexpr int ID_TGT_COPY = 304, ID_TGT_CLOSE = 305, ID_TGT_COPY_NAMES = 306;
@@ -90,6 +91,7 @@ HWND g_share_server_btn = nullptr;
 HWND g_select_all = nullptr;
 HWND g_clear = nullptr;
 HWND g_copy = nullptr;
+HWND g_lock = nullptr;
 HWND g_details = nullptr;
 HWND g_status = nullptr;
 HWND g_count = nullptr;
@@ -752,6 +754,13 @@ void update_actions() {
     EnableWindow(g_select_all, !g_busy && !g_row_ids.empty());
     EnableWindow(g_clear, !g_busy && has_any);
     EnableWindow(g_copy, !g_busy && has_ids);
+    if (g_lock) {
+        bool all_locked = has_ids;
+        for (auto id : g_selected_ids)
+            if (!g_mm->manually_locked(id)) { all_locked = false; break; }
+        SetWindowTextW(g_lock, all_locked ? L"Unlock" : L"Lock");
+        EnableWindow(g_lock, !g_busy && has_ids);
+    }
     EnableWindow(g_enable_btn, !g_busy && has_any);
     EnableWindow(g_update, !g_busy && has_ids);
     EnableWindow(g_remove, !g_busy && has_ids);
@@ -925,6 +934,7 @@ void refresh_list() {
     const std::string filter = read_edit(g_filter);
     auto visible = visible_mods(g_mm->list_all(), filter, g_only_updates, g_sort_mode,
         [&](std::uint64_t id) { return g_mm->update_available(id); });
+    for (auto& m : visible) m.locked = g_mm->locked(m.workshop_id);
 
     for (const auto& m : visible) {
         const auto& info = info_for_cached(m.folders.front());
@@ -1154,7 +1164,7 @@ void copy_selected_ids() {
     if (ids.empty()) return;
     if (copy_workshop_ids(ids))
         append_log("Copied " + std::to_string(ids.size()) +
-                   " Workshop ID(s). Paste them into another pzmodmgr.");
+                   " Workshop ID(s). Paste them into Add, or type lock first.");
     else
         append_log("Could not write to the clipboard.");
 }
@@ -1325,7 +1335,9 @@ void add_input() {
         return;
     }
     SetWindowTextW(g_input, L"");
-    start_command("add " + id);
+    const bool lock_command = id.compare(0, 5, "lock ") == 0 ||
+                              id.compare(0, 7, "unlock ") == 0;
+    start_command(lock_command ? id : "add " + id);
 }
 
 void update_selected() {
@@ -1336,6 +1348,21 @@ void update_selected() {
         return;
     }
     std::string cmd = "update";
+    for (auto id : ids) cmd += " " + std::to_string(id);
+    start_command(cmd);
+}
+
+void toggle_lock_selected() {
+    if (g_busy) return;
+    auto ids = selected_ids();
+    if (ids.empty()) {
+        append_log("Select a mod first.");
+        return;
+    }
+    bool all_locked = true;
+    for (auto id : ids)
+        if (!g_mm->manually_locked(id)) { all_locked = false; break; }
+    std::string cmd = all_locked ? "unlock" : "lock";
     for (auto id : ids) cmd += " " + std::to_string(id);
     start_command(cmd);
 }
@@ -1437,7 +1464,7 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     SIZE size{};
     GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
     const bool show_icon = id != ID_SETTINGS && id != ID_CHECK &&
-                           id != ID_SELF_UPDATE;
+                           id != ID_SELF_UPDATE && id != ID_LOCK;
     const int icon_w = show_icon ? 18 : 0;
     const int gap = show_icon ? 7 : 0;
     const int start = r.left + (r.right - r.left - icon_w - gap - size.cx) / 2;
@@ -2119,7 +2146,7 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (copy_workshop_ids(ids)) {
                 std::string message = "Copied " + std::to_string(ids.size()) +
                     " Workshop ID(s) from " + activation_name(target) +
-                    ". Paste the list into Add on the other pzmodmgr.";
+                    ". Paste into Add, or type lock first to pin them.";
                 const auto missing = g_mm->unmapped_mod_ids(target);
                 if (!missing.empty())
                     message += " " + std::to_string(missing.size()) +
@@ -2334,6 +2361,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_clear = CreateWindowW(L"BUTTON", L"Deselect",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 148, 554, 116, 32, hwnd,
                 (HMENU)ID_CLEAR, nullptr, nullptr);
+            g_lock = CreateWindowW(L"BUTTON", L"Lock",
+                WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 272, 554, 108, 32,
+                hwnd, (HMENU)ID_LOCK, nullptr, nullptr);
             g_copy = CreateWindowW(L"BUTTON", L"Copy IDs",
                 WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 392, 554, 104, 32,
                 hwnd, (HMENU)ID_COPY, nullptr, nullptr);
@@ -2346,7 +2376,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_remove = CreateWindowW(L"BUTTON", L"Remove",
                 WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW, 766, 554, 130, 32,
                 hwnd, (HMENU)ID_REMOVE, nullptr, nullptr);
-            for (HWND b : {g_select_all, g_clear, g_copy, g_update, g_update_all, g_remove})
+            for (HWND b : {g_select_all, g_clear, g_lock, g_copy, g_update, g_update_all, g_remove})
                 set_font(b, g_font_body);
 
             g_details = CreateWindowW(L"STATIC", L"No selection",
@@ -2465,7 +2495,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (wp == ID_ADD || wp == ID_UPDATE || wp == ID_REMOVE ||
             wp == ID_UPDATE_ALL || wp == ID_SELECT_ALL || wp == ID_CLEAR ||
-            wp == ID_COPY || wp == ID_SETTINGS || wp == ID_ENABLE ||
+            wp == ID_LOCK || wp == ID_COPY || wp == ID_SETTINGS || wp == ID_ENABLE ||
             wp == ID_SHARE_SERVER || wp == ID_FILTER_ALL ||
             wp == ID_FILTER_UPDATES || wp == ID_SORT || wp == ID_CHECK ||
             wp == ID_SELF_UPDATE) {
@@ -2481,6 +2511,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case ID_UPDATE:
             update_selected();
+            return 0;
+        case ID_LOCK:
+            toggle_lock_selected();
             return 0;
         case ID_REMOVE:
             remove_selected();

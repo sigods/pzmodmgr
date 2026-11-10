@@ -3,6 +3,8 @@
 #include "core/text.hpp"
 #include "core/updater.hpp"
 #include "core/url_c.h"
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -80,6 +82,80 @@ std::string decode_folder_token(const std::string& token) {
         value += static_cast<char>((high << 4) | low);
     }
     return value;
+}
+
+std::string lowercase(std::string value) {
+    for (char& c : value)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
+void add_unique(std::vector<std::uint64_t>& values, std::uint64_t value) {
+    if (value != 0 && std::find(values.begin(), values.end(), value) == values.end())
+        values.push_back(value);
+}
+
+// Resolves a paste-ready list of Workshop IDs or installed folder/name tokens.
+// A whole name with spaces is tried first, then each whitespace-separated token
+// gets an exact match or a unique substring match.
+Result resolve_lock_ids(ModManager& mm, const std::string& arg,
+                        std::vector<std::uint64_t>& ids) {
+    if (arg.empty()) return {false, "expected Workshop IDs or mod names"};
+    const auto mods = mm.list_all();
+
+    auto match = [&](const std::string& token, std::vector<std::uint64_t>& out) {
+        std::uint64_t id = 0;
+        if (pz_url_parse_workshop_id(token.data(), token.size(), &id)) {
+            for (const auto& mod : mods) {
+                if (mod.workshop_id == id) {
+                    add_unique(out, id);
+                    return true;
+                }
+            }
+            return false;
+        }
+        const std::string needle = lowercase(token);
+        std::vector<std::uint64_t> exact;
+        std::vector<std::uint64_t> partial;
+        for (const auto& mod : mods) {
+            if (mod.workshop_id == 0) continue;
+            const std::string name = lowercase(mod.name);
+            const std::string folder = lowercase(mod.folder);
+            if (name == needle || folder == needle)
+                add_unique(exact, mod.workshop_id);
+            else if (name.find(needle) != std::string::npos ||
+                     folder.find(needle) != std::string::npos)
+                add_unique(partial, mod.workshop_id);
+        }
+        if (exact.size() == 1) {
+            add_unique(out, exact.front());
+            return true;
+        }
+        if (exact.size() > 1) return false;
+        if (partial.size() == 1) {
+            add_unique(out, partial.front());
+            return true;
+        }
+        return false;
+    };
+
+    std::vector<std::uint64_t> whole;
+    if (match(arg, whole) && !whole.empty()) {
+        ids = std::move(whole);
+        return {true, {}};
+    }
+
+    std::string remaining = arg;
+    while (!remaining.empty()) {
+        const auto [token, tail] = split_first_word(remaining);
+        remaining = tail;
+        std::vector<std::uint64_t> matched;
+        if (!match(token, matched) || matched.empty())
+            return {false, "unknown or ambiguous mod: " + token};
+        for (auto id : matched) add_unique(ids, id);
+    }
+    if (ids.empty()) return {false, "no installed Workshop item matched: " + arg};
+    return {true, {}};
 }
 
 }  // namespace
@@ -185,8 +261,23 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
             list += std::to_string(id);
         }
         log(list.empty() ? std::string("(no Workshop IDs)") : list);
-        return {true, std::to_string(ids.size()) + " Workshop ID(s) from " + target.label +
-                      "; paste the list into Add on the other instance"};
+        std::string msg = std::to_string(ids.size()) + " Workshop ID(s) from " +
+                          target.label + "; paste into Add";
+        if (!list.empty()) msg += ", or pin them with: lock " + list;
+        return {true, msg};
+    }
+    if (cmd == "lock" || cmd == "unlock") {
+        std::vector<std::uint64_t> ids;
+        auto resolved = resolve_lock_ids(mm, arg, ids);
+        if (!resolved.ok) return resolved;
+        auto result = mm.set_locked(ids, cmd == "lock", log);
+        if (cmd == "unlock") {
+            for (auto id : ids) {
+                if (mm.server_locked(id))
+                    log("still locked by a server target: " + std::to_string(id));
+            }
+        }
+        return result;
     }
     if (cmd == "update") {
         if (arg.empty()) return mm.update_all(log);
@@ -203,8 +294,13 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
     }
     if (cmd == "list") {
         auto mods = mm.list();
-        for (const auto& m : mods)
-            log(m.name + " [" + m.folder + "] id=" + std::to_string(m.workshop_id));
+        for (const auto& m : mods) {
+            std::string line = m.name + " [" + m.folder + "] id=" +
+                               std::to_string(m.workshop_id);
+            if (m.locked) line += " [locked]";
+            else if (mm.server_locked(m.workshop_id)) line += " [server lock]";
+            log(line);
+        }
         return {true, std::to_string(mods.size()) + " mod(s)"};
     }
     if (cmd == "config") {
