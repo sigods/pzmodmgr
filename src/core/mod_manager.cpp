@@ -5,7 +5,7 @@
 #include "core/thread.hpp"
 #include "core/text.hpp"
 #include "core/updater.hpp"
-#include "core/url.hpp"
+#include "core/url_c.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -246,15 +246,16 @@ Result ModManager::set_zomboid_dir(const fs::path& dir) {
 }
 
 Result ModManager::add(const std::string& input, const LogFn& log) {
-    auto id = parse_workshop_id(input);
-    if (!id) return {false, "No Workshop ID found in: " + input};
+    std::uint64_t id = 0;
+    if (!pz_url_parse_workshop_id(input.data(), input.size(), &id))
+        return {false, "No Workshop ID found in: " + input};
 
     // Collections and single items share the same URL/numeric-id input.
-    auto children = fetch_collection_items(*id);
-    if (!children.empty()) return install_collection(*id, children, log);
+    auto children = fetch_collection_items(id);
+    if (!children.empty()) return install_collection(id, children, log);
 
-    if (is_installed(*id)) return {false, "Already installed. Use: update"};
-    return install(*id, fetch_remote_time_updated(*id), log, nullptr, true);
+    if (is_installed(id)) return {false, "Already installed. Use: update"};
+    return install(id, fetch_remote_time_updated(id), log, nullptr, true);
 }
 
 Result ModManager::remove(std::uint64_t id, const LogFn& log) {

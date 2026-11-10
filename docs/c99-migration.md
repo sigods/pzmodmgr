@@ -1,7 +1,6 @@
 # C99/C89 migration assessment
 
-Status after the native filesystem branch, URL port, and binary/memory
-optimization pass.
+Status after the 0.3.0 native-host reduction and URL C-API pass.
 
 ## What is already done
 
@@ -29,10 +28,15 @@ optimization pass.
   context, with a small templated constructor for existing lambdas. The
   internal capture sink in `steamcmd.cpp` is a template instead of
   `std::function`.
-- The URL parser is a C99 translation unit. `src/core/url.c` contains the
-  parsing logic and `src/core/url.cpp` is only an adapter to the existing
-  `std::optional`/`std::vector` API. CMake now enables `C` and builds it with
-  `C_STANDARD 99`.
+- The URL parser is a C99 translation unit. `src/core/url.c` owns parsing;
+  `src/core/mod_manager.cpp` and the browser native host call the C API
+  directly. `src/core/url.cpp` remains only as the
+  `std::optional`/`std::vector` adapter used by the batch command parser and
+  tests. CMake enables `C` and builds the parser with `C_STANDARD 99`.
+- The browser native host calls `ModManager::add`/`update_one` instead of
+  `run_command`, so this add/update-only process no longer links command
+  dispatch or the unused update helpers. The stripped host is 96,408 bytes on
+  Linux (was 125,080) and 286,700 on Windows (was 318,444).
 - Linux executables are linked with the static libstdc++ and libgcc runtimes,
   so the shipped binaries have no external C++ runtime dependency. This is a
   runtime milestone, not a source-level C99 conversion: the binary still
@@ -45,9 +49,9 @@ UPX 4.2.4 for both):
 | --- | ---: | ---: |
 | Windows `pzmodmgr.exe` stripped | 1,431,747 | 463,161 |
 | Windows `pzmodmgr.exe` UPX | 450,755 | 208,697 |
-| Windows native host stripped | 1,270,245 | 318,444 |
-| Windows setup (UPX) | 1,005,399 | 441,582 |
-| Windows ZIP (UPX build) | 1,031,282 | 449,981 |
+| Windows native host stripped | 1,270,245 | 286,700 |
+| Windows setup (UPX) | 1,005,399 | 427,758 |
+| Windows ZIP (UPX build) | 1,031,282 | 433,777 |
 | Linux `pzmodmgr` stripped, dynamic runtime | 338,280 | 334,184 |
 | Linux `pzmodmgr` stripped, self-contained runtime | 338,280 | 215,192 |
 | Linux dynamic `libstdc++` imports | 56 | 0 |
@@ -56,6 +60,12 @@ The shipped Linux binary has no `GLIBCXX` imports and no
 `libstdc++`/`libgcc_s` dependency. `ldd` now lists only Xlib, libm, libc, and
 Xlib's transitive X libraries. Windows imports only system DLLs. The remaining
 size is primarily the two UIs and header-instantiated container code.
+
+On the unreleased `0.3.0` branch, the native-host-only change lowers that host
+from 125,080 to 96,408 bytes on Linux (-22.9%) and from 318,444 to 286,700 bytes
+on Windows (-9.97%). The unchanged app is still 463,161 bytes stripped and
+208,697 bytes with UPX; the smaller host payload takes the Windows setup from
+441,582 to 427,758 bytes and the ZIP from 449,983 to 433,777 bytes.
 
 ## Non-std binary and memory work
 
@@ -173,5 +183,6 @@ into abort paths instead of pulling in the C++ unwinder.
   actions blocking.
 - The Windows installer and uninstaller are separate C++ programs. They also
   need conversion before the whole distribution is libstdc++-free.
-- The native messaging host links `pzcore`; it inherits the same core migration
-  and must remain a console-subsystem program.
+- The native messaging host links `pzcore`, but now references only the
+  add/update path; it inherits the remaining core migration and must remain a
+  console-subsystem program.

@@ -1,7 +1,8 @@
 // Firefox native messaging host: one framed JSON request per process.
 // Supported request: {"url":"<workshop item or collection url/id>"}
-#include "core/commands.hpp"
+#include "core/mod_manager.hpp"
 #include "core/paths.hpp"
+#include "core/url_c.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -125,13 +126,16 @@ int main() {
     if (url.empty()) {
         result = {false, "Missing Workshop URL or ID."};
     } else {
-        result = pz::run_command(mm, "add " + url, logfn);
+        result = mm.add(url, logfn);
         // The browser menu is a single "Add or update" action. An item that is
         // already installed is updated instead of ending in a dead end; an
         // unchanged item reports "Up to date" without downloading.
         if (!result.ok && result.message.rfind("Already installed", 0) == 0) {
-            log.clear();
-            result = pz::run_command(mm, "update " + url, logfn);
+            std::uint64_t id = 0;
+            if (pz_url_parse_workshop_id(url.data(), url.size(), &id)) {
+                log.clear();
+                result = mm.update_one(id, logfn);
+            }
         }
     }
 
