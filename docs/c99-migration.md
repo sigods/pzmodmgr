@@ -1,6 +1,6 @@
 # C99/C89 migration assessment
 
-Status after the 0.3.0 native-host reduction and URL C-API pass.
+Status after the 0.3.0 Windows static-runtime pass and the C99 native-host rewrite.
 
 ## What is already done
 
@@ -20,10 +20,11 @@ Status after the 0.3.0 native-host reduction and URL C-API pass.
   from the application's hot paths. The replacements are `pz::thread`,
   `pz::mutex`/`pz::lock_guard`, `pz::error_code`, epoch-seconds timestamps, and
   the vector-backed `pz::flat_map`/`pz::flat_set`.
-- No libstdc++ archive member is pulled into the final link. The remaining
-  `std::string`, `std::vector`, `std::wstring`, `std::optional`, and
-  `std::string_view` uses are header-instantiated or covered by the small
-  abort-based runtime shim.
+- Linux still links only the small header-instantiated `std::string`,
+  `std::vector`, `std::wstring`, `std::optional`, and `std::string_view`
+  surface. Windows also pulls libstdc++'s static string/exception support and
+  winpthreads; this pass removes the avoidable terminate/demangler and printf
+  formatter paths, but that runtime remains in the app image.
 - `std::function` is gone. `LogFn` is now a function pointer plus an opaque
   context, with a small templated constructor for existing lambdas. The
   internal capture sink in `steamcmd.cpp` is a template instead of
@@ -40,17 +41,19 @@ Status after the 0.3.0 native-host reduction and URL C-API pass.
   parser call the C API directly; tests do the same. The old
   `url.cpp`/`url.hpp` adapter has been removed. CMake enables `C` and builds
   the parser with `C_STANDARD 99`.
-- The browser native host calls `ModManager::add`/`update_one` instead of
-  `run_command`, so this add/update-only process no longer links command
-  dispatch or the unused update helpers. The stripped host is 96,408 bytes on
-  Linux (was 125,080) and 286,700 on Windows (was 318,444).
+- The browser native host is now C99 (`src/native/native_host.c`). It locates
+  the sibling `pzmodmgr` executable, runs the normal `add`/`update` CLI, captures
+  its output, and returns the same framed JSON. It links only `url.c` and the C
+  runtime; it does not link `pzcore` or any C++ runtime. The stripped host is
+  10,160 bytes on Linux and 48,728 on Windows.
 - Linux executables are linked with the static libstdc++ and libgcc runtimes,
   so the shipped binaries have no external C++ runtime dependency. This is a
   runtime milestone, not a source-level C99 conversion: the binary still
   contains C++ code and the build still uses a C++ compiler.
 
-Measured sizes (before = `v0.2.4`, after = this branch; Windows packaging uses
-UPX 4.2.4 for both):
+Historical sizes from the first reduction pass (before = `v0.2.4`; Windows
+packaging used UPX 4.2.4 for both). Current final sizes are below in the 0.3.0
+Windows size pass:
 
 | Artifact | Before | Now |
 | --- | ---: | ---: |
@@ -64,19 +67,100 @@ UPX 4.2.4 for both):
 | Linux dynamic `libstdc++` imports | 56 | 0 |
 
 The shipped Linux binary has no `GLIBCXX` imports and no
-`libstdc++`/`libgcc_s` dependency. `ldd` now lists only Xlib, libm, libc, and
-Xlib's transitive X libraries. Windows imports only system DLLs. The remaining
-size is primarily the two UIs and header-instantiated container code.
+`libstdc++`/`libgcc_s` dependency. `ldd` lists only Xlib, libm, libc, and Xlib's
+transitive X libraries. Windows imports only system DLLs. The remaining size is
+mostly the two UIs, header-instantiated container code, and the Windows runtime
+described above.
 
-On the unreleased `0.3.0` branch, the native-host-only change lowers that host
-from 125,080 to 96,408 bytes on Linux (-22.9%) and from 318,444 to 286,700 bytes
-on Windows (-9.97%). The unchanged app is still 463,161 bytes stripped and
-208,697 bytes with UPX; the smaller host payload takes the Windows setupfrom 441,582 to 427,758 bytes and the ZIP from 449,983 to 433,732 bytes.
+## 0.3.0 Windows size pass
 
-After rebasing onto the 0.2.6 fixes, replacing the small-list sorts reduced the
-stripped Linux app from 219,288 to 207,000 bytes (-5.6%) and the Linux native
-host from 96,408 to 92,312 bytes (-4.3%). No Windows remeasurement has been
-made for this sort change yet.
+The Windows app was measured after the 0.2.6 rebase, then reduced without
+changing its feature set. Sizes are stripped release binaries; UPX is not
+included in these comparisons.
+
+| Artifact | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Windows `pzmodmgr.exe` | 450,328 | **365,718** | -84,610 (-18.8%) |
+| Windows native host | 281,068 | **48,728** | -232,340 (-82.7%) |
+| Linux `pzmodmgr` | 194,560 | **194,560** | unchanged |
+| Linux native host | 79,872 | **10,160** | -69,712 (-87.3%) |
+
+Each Windows change was measured separately:
+
+| Change | App before | App after | Host before | Host after |
+| --- | ---: | ---: | ---: | ---: |
+| Minimal verbose terminate handler (drops `cp-demangle.o`) | 450,328 | 391,448 | 281,068 | 221,676 |
+| Replace `snprintf` hex/decimal formatting | 391,448 | 391,960 | 221,676 | 196,520 |
+| Replace the last `fprintf` in CLI output | 391,960 | **365,718** | 196,520 | **196,520** |
+| C99 native host, no `pzcore` link | 365,718 | **365,718** | 196,520 | **48,728** |
+
+The app temporarily grew by 512 bytes when `snprintf` was removed because
+`main.cpp` still called `fprintf`; replacing that final formatted write removed
+MinGW's `__mingw_pformat`/`gdtoa` chain from the app as well. The host had no
+`fprintf`, so it dropped 25,156 bytes at the `snprintf` step.
+
+### Section comparison
+
+| Section/group | Linux app | Windows app | Difference |
+| --- | ---: | ---: | ---: |
+| `.text` | 161,497 | 256,016 | +94,519 |
+| read-only data (`.rodata`+`.data.rel.ro` / `.rdata`) | 14,856 | 23,288 | +8,432 |
+| unwind/SEH (`.eh_frame*` / `.pdata`+`.xdata`) | 172 | 15,016 | +14,844 |
+| resources (`.rsrc`) | 0 | 46,072 | +46,072 |
+| imports/dynamic tables | 13,877 | 8,776 | -5,101 |
+| relocations | 7,056 | 612 | -6,444 |
+| headers/alignment | 3,807 | 12,642 | +8,835 |
+| **File size** | **194,560** | **365,718** | **+171,158** |
+
+The same pass produced a 323,540-byte Windows ZIP (from 433,732 in the first
+UPX build); the setup was 807,089 bytes without UPX here, so it is not compared
+to the earlier UPX-packed setup.
+
+The Windows-only parts are therefore:
+
+- `.rsrc` 46,072 bytes: a 43,233-byte nine-frame PNG icon plus manifest and
+  version info. The icon is already PNG-compressed; trimming it would mean
+  dropping resolutions, not changing the encoding.
+- `.pdata` + `.xdata` 15,016 bytes: x64 SEH/unwind metadata. Linux carries only
+  172 bytes of `.eh_frame` because it is built without unwind tables. Removing
+  the Windows metadata would break stack walking and crash handling.
+- PE headers/alignment 12,642 bytes versus about 3,807 bytes of ELF headers.
+- `.idata` 8,776 bytes of import tables, against Linux dynamic symbols and
+  relocations.
+- Static runtime still embedded in `.text`: about 27.5 KB of winpthreads plus
+  MinGW startup/CRT and the libstdc++ string/exception path. The pthread code
+  is pulled by libstdc++'s exception/TLS support, not by app code.
+
+What was tried and rejected:
+
+- `-Wl,--no-seh` would remove the 15 KB unwind section but breaks x64 stack
+  unwinding; not used.
+- `-Wl,--disable-dynamicbase` would remove 612 bytes of `.reloc` but disables
+  ASLR; not used.
+- `-fno-threadsafe-statics` saved only 479 bytes (the UI statics are already
+  single-threaded), not enough to justify the weaker guarantee.
+- LTO remains unusable on MinGW GCC 15.2: it reproduces the
+  `binds_to_current_def_p` ICE in `selected_ids`.
+
+## LodePNG evaluation
+
+LodePNG was built alone with its encoder and disk support disabled, both as C++
+and as C99. It was tested against the nine unique real icon images in the
+project: the 16, 20, 24, 32, 40, 48, 64, 128, and 256 pixel ICO frames. The
+duplicated extension/assets copies were not counted. All are 8-bit RGBA,
+non-interlaced PNGs; no malformed PNG tests were added because upstream covers
+that surface.
+
+| Item | stb_image (PNG only) | LodePNG decoder-only |
+| --- | ---: | ---: |
+| Object, C99 build | 48,496 | 95,840 |
+| Object, C++ build | 48,496 | 100,584 |
+| Identical linked decoder | 198,992 | 223,568 (+24,576) |
+
+All nine decoded images matched byte-for-byte by RGBA hash. Peak RSS for the
+256px decode was 11,920 KB for both. LodePNG does not save binary size here, so
+stb_image remains.
+
 
 ## Non-std binary and memory work
 
@@ -194,6 +278,6 @@ into abort paths instead of pulling in the C++ unwinder.
   actions blocking.
 - The Windows installer and uninstaller are separate C++ programs. They also
   need conversion before the whole distribution is libstdc++-free.
-- The native messaging host links `pzcore`, but now references only the
-  add/update path; it inherits the remaining core migration and must remain a
-  console-subsystem program.
+- The native messaging host is C99 but now depends on the sibling `pzmodmgr`
+  executable being present and runnable. It must remain a console-subsystem
+  program, and its add/update behavior is covered by the native-host test.

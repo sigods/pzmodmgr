@@ -81,8 +81,8 @@ add_executable(pzmodmgr src/main.cpp src/ui/mod_icon.cpp)
 target_include_directories(pzmodmgr PRIVATE third_party)
 target_link_libraries(pzmodmgr PRIVATE pzcore Threads::Threads)
 
-add_executable(pzmodmgr_native_host src/native/native_host.cpp)
-target_link_libraries(pzmodmgr_native_host PRIVATE pzcore)
+add_executable(pzmodmgr_native_host src/native/native_host.c src/core/url.c)
+target_include_directories(pzmodmgr_native_host PRIVATE src)
 
 install(TARGETS pzmodmgr pzmodmgr_native_host RUNTIME DESTINATION .)
 install(FILES README.md LICENSE DESTINATION .)
