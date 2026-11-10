@@ -1229,6 +1229,7 @@ int run_ui(ModManager& mm) {
 
         draw_button(Btn::SelectAll);
         draw_button(Btn::Clear);
+        draw_button(Btn::Lock);
         draw_button(Btn::Copy);
         draw_button(Btn::Update);
         draw_button(Btn::UpdateAll);
