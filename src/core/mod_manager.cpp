@@ -816,7 +816,8 @@ std::string ModManager::preferred_mod_id_for(std::uint64_t workshop_id) const {
         long long id_version = 0;
         std::string folder;
     };
-    std::vector<Choice> choices;
+    Choice best;
+    bool have_best = false;
     for (const auto& mod : db_) {
         if (mod.workshop_id != workshop_id) continue;
         auto info = read_mod_info(cfg_.user_mods_dir / mod.folder, game_version_);
@@ -828,18 +829,23 @@ std::string ModManager::preferred_mod_id_for(std::uint64_t workshop_id) const {
         choice.folder_version = trailing_number(mod.folder);
         choice.id_version = trailing_number(info->id);
         choice.folder = mod.folder;
-        choices.push_back(std::move(choice));
+        if (!have_best) {
+            best = std::move(choice);
+            have_best = true;
+            continue;
+        }
+        const bool better =
+            choice.compatible != best.compatible
+                ? choice.compatible > best.compatible
+                : choice.version_min != best.version_min
+                      ? choice.version_min > best.version_min
+                      : choice.folder_version != best.folder_version
+                            ? choice.folder_version > best.folder_version
+                            : choice.id_version != best.id_version
+                                  ? choice.id_version > best.id_version
+                                  : choice.folder > best.folder;
+        if (better) best = std::move(choice);
     }
-    if (choices.empty()) return {};
-    const auto& best = *std::max_element(choices.begin(), choices.end(),
-        [](const Choice& a, const Choice& b) {
-            if (a.compatible != b.compatible) return a.compatible < b.compatible;
-            if (a.version_min != b.version_min) return a.version_min < b.version_min;
-            if (a.folder_version != b.folder_version)
-                return a.folder_version < b.folder_version;
-            if (a.id_version != b.id_version) return a.id_version < b.id_version;
-            return a.folder < b.folder;
-        });
     return best.id;
 }
 

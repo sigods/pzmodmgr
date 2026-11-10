@@ -333,7 +333,7 @@ bool start_detached_process(const fs::path& exe,
     std::vector<std::string> storage;
     storage.reserve(args.size() + 1);
     storage.push_back(exe.string());
-    storage.insert(storage.end(), args.begin(), args.end());
+    for (const auto& arg : args) storage.push_back(arg);
     std::vector<char*> argv;
     argv.reserve(storage.size() + 1);
     for (auto& value : storage) argv.push_back(value.data());

@@ -238,20 +238,21 @@ std::string rewrite_block_mod_ids(const std::string& text,
     if (open >= 0 && close > open) {
         std::vector<std::string> out;
         out.reserve(lines.size() + mod_ids.size());
-	out.insert(out.end(), lines.begin(), lines.begin() + mods_line);
-        out.insert(out.end(), block.begin(), block.end());
-        out.insert(out.end(), lines.begin() + close + 1, lines.end());
+        for (int i = 0; i < mods_line; ++i) out.push_back(std::move(lines[i]));
+        for (const auto& line : block) out.push_back(line);
+        for (std::size_t i = static_cast<std::size_t>(close + 1); i < lines.size(); ++i)
+            out.push_back(std::move(lines[i]));
         return join_lines(out, crlf);
     }
 
     if (lines.empty()) {
         std::vector<std::string> fresh{"version = 1,", ""};
-        fresh.insert(fresh.end(), block.begin(), block.end());
+        for (const auto& line : block) fresh.push_back(line);
         return join_lines(fresh, crlf);
     }
-    std::vector<std::string> out = lines;
+    std::vector<std::string> out = std::move(lines);
     if (!out.empty() && !trim(out.back()).empty()) out.push_back("");
-    out.insert(out.end(), block.begin(), block.end());
+    for (const auto& line : block) out.push_back(line);
     return join_lines(out, crlf);
 }
 
@@ -383,7 +384,7 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
         }
     }
     sort_targets(saves);
-    targets.insert(targets.end(), saves.begin(), saves.end());
+    for (auto& target : saves) targets.push_back(std::move(target));
 
     std::vector<ActivationTarget> servers;
     fs::directory_iterator ini_files(zomboid_dir / "Server", ec);
@@ -402,7 +403,7 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
         }
     }
     sort_targets(servers);
-    targets.insert(targets.end(), servers.begin(), servers.end());
+    for (auto& target : servers) targets.push_back(std::move(target));
     return targets;
 }
 
