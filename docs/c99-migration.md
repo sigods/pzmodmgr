@@ -150,29 +150,32 @@ value, and its size changes with build paths. Switching the Windows packaging
 script to `strip --strip-all` removes it. The native host also drops from
 48,728 to 46,080 bytes.
 
-The nine-frame ICO was reduced to the six resolutions Windows uses most:
-16, 24, 32, 48, 64, and 256 pixels. The 20, 40, and 128 pixel frames were
-removed; Windows scales the nearest available frame for those uncommon DPI
-steps. The 256 pixel frame is kept for Explorer's extra-large view. The ICO
-goes from 43,233 to 29,684 bytes (-13,549), and `.rsrc` from 46,072 to 32,368.
-A lossless recompression attempt only saved 402 bytes, so it was rejected.
+The nine-frame ICO was reduced to the five sizes used by normal Explorer and
+desktop layouts: 16, 24, 32, 48, and 64 pixels. The 20, 40, 128, and 256 pixel
+frames were removed; Windows scales the nearest available frame for uncommon
+DPI steps. The 256 pixel frame only served Explorer's extra-large view, which
+this project does not target. The ICO goes from 43,233 to 13,463 bytes
+(-29,770), and `.rsrc` from 46,072 to 16,096. A lossless recompression attempt
+only saved 402 bytes, so it was rejected.
 
 | Section/group | Before | After | Change |
 | --- | ---: | ---: | ---: |
 | `.text` | 256,624 | 256,624 | 0 |
 | read-only data (`.rdata`) | 23,768 | 23,768 | 0 |
 | unwind/SEH (`.pdata`+`.xdata`) | 15,088 | 15,088 | 0 |
-| resources (`.rsrc`) | 46,072 | 32,368 | -13,704 |
+| resources (`.rsrc`) | 46,072 | 16,096 | -29,976 |
 | imports/dynamic tables | 8,808 | 8,808 | 0 |
 | relocations | 600 | 600 | 0 |
 | COFF symbol overlay | 9,399 | 0 | -9,399 |
-| headers/padding | 3,216 | 3,608 | +392 |
-| **Windows app file** | **367,287** | **344,576** | **-22,711 (-6.2%)** |
+| headers/padding | 3,216 | 3,496 | +280 |
+| **Windows app file** | **367,287** | **328,192** | **-39,095 (-10.6%)** |
 
 The rebuilt baseline is 367,287 rather than the earlier 365,718 because the
 COFF symbol table includes build paths; `strip --strip-all` makes the result
-independent of them. The final no-UPX package is 744,448 bytes for the setup
-and 291,405 bytes for the ZIP, against 807,089 and 323,540 before the pass.
+independent of them. Dropping the 256 pixel frame alone took the app from
+344,576 to 328,192 bytes. The final no-UPX package is 695,296 bytes for the
+setup and 258,948 bytes for the ZIP, against 807,089 and 323,540 before the
+pass.
 
 ## LodePNG evaluation
 
