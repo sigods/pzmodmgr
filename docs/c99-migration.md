@@ -118,9 +118,9 @@ to the earlier UPX-packed setup.
 
 The Windows-only parts are therefore:
 
-- `.rsrc` 46,072 bytes: a 43,233-byte nine-frame PNG icon plus manifest and
-  version info. The icon is already PNG-compressed; trimming it would mean
-  dropping resolutions, not changing the encoding.
+- `.rsrc` 46,072 bytes at the time: a 43,233-byte nine-frame PNG icon plus
+  manifest and version info. The icon is already PNG-compressed; trimming it
+  means dropping resolutions, not changing the encoding.
 - `.pdata` + `.xdata` 15,016 bytes: x64 SEH/unwind metadata. Linux carries only
   172 bytes of `.eh_frame` because it is built without unwind tables. Removing
   the Windows metadata would break stack walking and crash handling.
@@ -141,6 +141,38 @@ What was tried and rejected:
   single-threaded), not enough to justify the weaker guarantee.
 - LTO remains unusable on MinGW GCC 15.2: it reproduces the
   `binds_to_current_def_p` ICE in `selected_ids`.
+
+### PE overlay and icon follow-up
+
+A later pass found that `strip --strip-unneeded` left a 252-entry COFF symbol
+table after the last PE section. It is a 9,399-byte overlay with no runtime
+value, and its size changes with build paths. Switching the Windows packaging
+script to `strip --strip-all` removes it. The native host also drops from
+48,728 to 46,080 bytes.
+
+The nine-frame ICO was reduced to the six resolutions Windows uses most:
+16, 24, 32, 48, 64, and 256 pixels. The 20, 40, and 128 pixel frames were
+removed; Windows scales the nearest available frame for those uncommon DPI
+steps. The 256 pixel frame is kept for Explorer's extra-large view. The ICO
+goes from 43,233 to 29,684 bytes (-13,549), and `.rsrc` from 46,072 to 32,368.
+A lossless recompression attempt only saved 402 bytes, so it was rejected.
+
+| Section/group | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `.text` | 256,624 | 256,624 | 0 |
+| read-only data (`.rdata`) | 23,768 | 23,768 | 0 |
+| unwind/SEH (`.pdata`+`.xdata`) | 15,088 | 15,088 | 0 |
+| resources (`.rsrc`) | 46,072 | 32,368 | -13,704 |
+| imports/dynamic tables | 8,808 | 8,808 | 0 |
+| relocations | 600 | 600 | 0 |
+| COFF symbol overlay | 9,399 | 0 | -9,399 |
+| headers/padding | 3,216 | 3,608 | +392 |
+| **Windows app file** | **367,287** | **344,576** | **-22,711 (-6.2%)** |
+
+The rebuilt baseline is 367,287 rather than the earlier 365,718 because the
+COFF symbol table includes build paths; `strip --strip-all` makes the result
+independent of them. The final no-UPX package is 744,448 bytes for the setup
+and 291,405 bytes for the ZIP, against 807,089 and 323,540 before the pass.
 
 ## LodePNG evaluation
 
