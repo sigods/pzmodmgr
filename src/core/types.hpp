@@ -58,6 +58,9 @@ struct InstalledMod {
     // False when the manager adopted a folder it did not install. Removing the
     // record must then leave the folder alone.
     bool owned = true;
+    // Manual update lock. Server-enabled items are locked dynamically too; this
+    // flag only remembers a lock the user set for an item outside a server.
+    bool locked = false;
 };
 
 struct Result {

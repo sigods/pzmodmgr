@@ -44,8 +44,15 @@ plain Mod IDs on both builds; B42's leading backslash is only for a server
 INI's `Mods=` line. Multi-folder Workshop items enable only the newest
 game-compatible variant. Manual mods that are not
 in `installed.tsv` are listed too and can be enabled or disabled by folder.
-`Share server` copies the server's enabled Workshop IDs as a space-separated
-list that can be pasted into `Add` on another instance. Removing an item first
+Items enabled in a server INI are treated as version-locked: update checks still
+report newer versions, but `Update` and `Update all` skip them. The `Lock` /
+`Unlock` action pins any selected item outside a server too; the lock is stored
+as the sixth `installed.tsv` column and survives restarts. Removing a server's
+`Mods=` entry releases the automatic lock. `Share server` copies the server's
+enabled Workshop IDs as a space-separated list that can be pasted into `Add` on
+another instance. To pin those same items there, run `pzmodmgr lock <ids>` or
+prefix the pasted list with `lock`; installed folder or mod names are accepted
+too (`lock "My Mod"`). Removing an item first
 disables its Mod IDs in `mods/default.txt`, every save's `mods.txt`, and every
 server `.ini`; removal stops if one of those files cannot be written. No password
 is stored: run steamcmd manually once so its login is cached.

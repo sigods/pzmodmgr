@@ -59,6 +59,7 @@ struct ModRow {
     std::string name;
     std::vector<std::string> folders;
     std::uint64_t time_updated = 0;
+    bool locked = false;
 };
 
 inline std::string join_workshop_ids(const std::vector<std::uint64_t>& ids) {
@@ -135,6 +136,7 @@ std::vector<ModRow> visible_mods(const std::vector<InstalledMod>& mods,
         if (existing != visible.end()) {
             existing->folders.push_back(m.folder);
             existing->time_updated = std::max(existing->time_updated, m.time_updated);
+            existing->locked = existing->locked || m.locked;
             continue;
         }
         ModRow row;
@@ -142,6 +144,7 @@ std::vector<ModRow> visible_mods(const std::vector<InstalledMod>& mods,
         row.name = m.name;
         row.folders.push_back(m.folder);
         row.time_updated = m.time_updated;
+        row.locked = m.locked;
         visible.push_back(std::move(row));
     }
     if (sort_mode == 0) {
@@ -170,6 +173,7 @@ inline std::string mod_meta(const ModRow& mod, const ModInfo* info,
         meta += value;
     };
     if (mod.folders.size() == 1) add(mod.folders.front());
+    if (mod.locked) add("Locked");
     if (!enabled_in_targets.empty()) add("On: " + enabled_in_targets);
     const std::string updated = format_update_date(mod.time_updated);
     if (!updated.empty()) add("Updated " + updated);

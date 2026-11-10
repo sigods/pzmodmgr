@@ -71,6 +71,17 @@ public:
     // not installed. Manual mods count as installed if their mod.info is present.
     std::vector<MissingRequirement> missing_requirements() const;
     bool update_available(std::uint64_t workshop_id) const;
+    // True when the item was explicitly locked by the user.
+    bool manually_locked(std::uint64_t workshop_id) const;
+    // True when the item is enabled in any discovered server target.
+    bool server_locked(std::uint64_t workshop_id) const;
+    std::vector<std::uint64_t> server_locked_ids() const;
+    // True when updates must be skipped: either lock above applies.
+    bool locked(std::uint64_t workshop_id) const;
+    std::string lock_reason(std::uint64_t workshop_id) const;
+    // Persists a manual lock for every folder of each installed Workshop item.
+    Result set_locked(const std::vector<std::uint64_t>& workshop_ids, bool locked,
+                      const LogFn& log);
     bool app_update_available() const { return app_update_available_; }
     // True when either an installed mod or the app release is due for a check.
     bool update_check_due() const;
@@ -108,6 +119,8 @@ private:
     Result disable_mod_ids(const std::vector<std::string>& mod_ids,
                            int& disabled_targets, const LogFn& log);
     bool is_installed(std::uint64_t id) const;
+    bool is_locked_in(const std::vector<std::uint64_t>& ids,
+                      std::uint64_t workshop_id) const;
     std::vector<std::uint64_t> unique_installed_ids() const;
     std::uint64_t recorded_time(std::uint64_t id) const;
 };

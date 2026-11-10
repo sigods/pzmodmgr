@@ -314,6 +314,64 @@ void test_corrupt_db(const pz::fs::path& root) {
           "adopted record and owned flag survive corrupt lines");
 }
 
+void test_version_locks(const pz::fs::path& root) {
+    pz::Config cfg;
+    cfg.zomboid_dir = root / "locks" / "Zomboid";
+    cfg.user_mods_dir = cfg.zomboid_dir / "mods";
+    cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
+    cfg.steamcmd_exe = pz::builtin_steamcmd_path(cfg);
+    write_file(cfg.user_mods_dir / "FixtureLock" / "mod.info",
+               "id=FixtureLock\nname=Fixture Lock\nmodversion=1.0\n");
+    // The old five-column format must load with no lock.
+    write_file(cfg.data_dir / "installed.tsv",
+               "777\tFixtureLock\tFixture Lock\t1700000000\t1\n");
+
+    pz::ModManager mm(cfg);
+    check(!mm.locked(777), "old installed.tsv rows load unlocked");
+    auto logfn = [](const std::string&) {};
+    auto lock = mm.set_locked({777}, true, logfn);
+    check(lock.ok && mm.locked(777) && mm.manually_locked(777),
+          "manual lock applies and persists to the row");
+    check(read_file(cfg.data_dir / "installed.tsv").find("\t1\n") != std::string::npos,
+          "manual lock saved as the sixth installed.tsv column");
+    {
+        pz::ModManager restarted(cfg);
+        check(restarted.manually_locked(777), "manual lock survives restart");
+    }
+
+    auto unlocked = pz::run_command(mm, "unlock 777", logfn);
+    check(unlocked.ok && !mm.locked(777), "unlock by Workshop ID clears the lock");
+    auto by_name = pz::run_command(mm, "lock Fixture Lock", logfn);
+    check(by_name.ok && mm.manually_locked(777), "lock accepts an installed mod name");
+    check(pz::run_command(mm, "unlock 777", logfn).ok, "name-lock fixture unlocked");
+
+    // Server targets lock their enabled items without storing a manual flag.
+    write_file(cfg.zomboid_dir / "Server" / "local.ini",
+               "Mods=\\FixtureLock\nWorkshopItems=777\n");
+    check(mm.server_locked(777) && mm.locked(777),
+          "server-enabled item is locked automatically");
+    check(mm.lock_reason(777) == "server-enabled", "server lock reason is reported");
+    auto skipped = mm.update_one(777, logfn);
+    check(skipped.ok && skipped.message.find("Locked (server-enabled)") != std::string::npos,
+          "update_one skips a server-locked item before checking Steam");
+    auto all = mm.update_all(logfn);
+    check(all.ok && all.message.find("skipped 1 locked") != std::string::npos,
+          "update_all reports server-locked items as skipped");
+
+    // Removing the manual flag does not override the server's protection.
+    auto still_server = pz::run_command(mm, "unlock 777", logfn);
+    check(still_server.ok && mm.locked(777) && !mm.manually_locked(777),
+          "unlock leaves a server-enabled item locked");
+    pz::error_code ec;
+    pz::fs::remove(cfg.zomboid_dir / "Server" / "local.ini", ec);
+    check(!ec && !mm.locked(777), "removing the server list releases the automatic lock");
+
+    // A shared ID list can be pasted into lock on another instance.
+    auto shared = pz::run_command(mm, "lock 777", logfn);
+    check(shared.ok && mm.manually_locked(777),
+          "shared Workshop IDs can be locked directly");
+}
+
 void test_read_mod_info(const pz::fs::path& root) {
     auto dir = root / "read_mod_info";
     write_file(dir / "mod.info",
@@ -1350,6 +1408,7 @@ int main() {
     test_external_reload(root);
     test_native_fs_copy(root);
     test_corrupt_db(root);
+    test_version_locks(root);
     test_read_mod_info(root);
     test_missing_requirements(root);
     test_discover_mod_roots(root);
