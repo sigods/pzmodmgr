@@ -203,6 +203,7 @@ ModManager::ModManager(Config cfg)
     fs::create_directories(cfg_.data_dir);
     prune_stale_state(cfg_.data_dir);
     load_db();
+    load_update_state();
     load_app_update_state();
 }
 
@@ -239,6 +240,7 @@ Result ModManager::set_zomboid_dir(const fs::path& dir) {
     updates_.clear();
     app_update_available_ = false;
     load_db();
+    load_update_state();
     load_app_update_state();
     return {true, "Zomboid folder set to " + normalized.string()};
 }
@@ -256,7 +258,19 @@ Result ModManager::add(const std::string& input, const LogFn& log) {
 }
 
 Result ModManager::remove(std::uint64_t id, const LogFn& log) {
-    bool any = false;
+    if (!is_installed(id)) return {false, "Not installed: " + std::to_string(id)};
+
+    // Read the Mod IDs while the folders still exist. Removing them from every
+    // activation list first prevents a save or server from loading a mod whose
+    // files are already gone; if a list cannot be written, keep the mod intact.
+    const std::vector<std::string> removed_ids = mod_ids_for(id);
+    int disabled_targets = 0;
+    auto disabled = disable_mod_ids(removed_ids, disabled_targets, log);
+    if (!disabled.ok) return disabled;
+    if (removed_ids.empty())
+        log("warning: no Mod ID found for " + std::to_string(id) +
+            "; mod lists were not changed");
+
     int removed = 0, kept = 0;
     for (const auto& m : db_) {
         if (m.workshop_id != id) continue;
@@ -271,17 +285,43 @@ Result ModManager::remove(std::uint64_t id, const LogFn& log) {
             log("stopped tracking " + m.folder + " (left in place)");
             ++kept;
         }
-        any = true;
     }
-    if (!any) return {false, "Not installed: " + std::to_string(id)};
     updates_.erase(id);
     db_.erase(std::remove_if(db_.begin(), db_.end(),
               [&](const InstalledMod& m) { return m.workshop_id == id; }), db_.end());
     save_db();
+    save_update_state();
     std::string msg = removed != 0 ? "Removed " + std::to_string(id)
                                    : "Stopped tracking " + std::to_string(id);
     if (kept != 0) msg += " (left " + std::to_string(kept) + " existing folder(s) in place)";
+    if (disabled_targets != 0)
+        msg += " (disabled in " + std::to_string(disabled_targets) + " mod list(s))";
     return {true, msg};
+}
+
+Result ModManager::disable_mod_ids(const std::vector<std::string>& mod_ids,
+                                   int& disabled_targets, const LogFn& log) {
+    disabled_targets = 0;
+    if (mod_ids.empty()) return {true, {}};
+
+    auto targets = activation_targets();
+    for (auto& target : targets) {
+        std::vector<std::string> affected;
+        for (const auto& id : mod_ids) {
+            if (std::find(target.mod_ids.begin(), target.mod_ids.end(), id) !=
+                target.mod_ids.end())
+                affected.push_back(id);
+        }
+        if (affected.empty()) continue;
+
+        if (!write_activation_target(target, affected, {}, false))
+            return {false, "Could not disable " + std::to_string(affected.size()) +
+                           " Mod ID(s) in " + target.path.string()};
+        ++disabled_targets;
+        log("disabled " + std::to_string(affected.size()) + " Mod ID(s) in " +
+            target.label);
+    }
+    return {true, {}};
 }
 
 Result ModManager::update_one(std::uint64_t id, const LogFn& log) {
@@ -290,6 +330,7 @@ Result ModManager::update_one(std::uint64_t id, const LogFn& log) {
     if (remote == 0) return {false, "Update check failed: " + std::to_string(id)};
     if (remote <= recorded_time(id)) {
         updates_[id] = false;
+        save_update_state();
         return {true, "Up to date: " + std::to_string(id)};
     }
 
@@ -297,6 +338,7 @@ Result ModManager::update_one(std::uint64_t id, const LogFn& log) {
     auto r = install(id, remote, log, &changed);
     if (!r.ok) return r;
     updates_[id] = false;
+    save_update_state();
     if (!changed) return {true, r.message};
     return {true, "Updated " + std::to_string(id) + ": " + r.message};
 }
@@ -336,6 +378,7 @@ Result ModManager::update_all(const LogFn& log) {
         }
     }
     if (!ids.empty()) record_update_check();
+    save_update_state();
     std::string msg = "Updated " + std::to_string(updated) + " mod item(s)";
     if (unchanged != 0) msg += ", " + std::to_string(unchanged) + " unchanged";
     if (skipped != 0) msg += ", skipped " + std::to_string(skipped) + " (update check failed)";
@@ -365,6 +408,7 @@ Result ModManager::check_updates(const LogFn& log) {
         }
     }
     if (!ids.empty()) record_update_check();
+    save_update_state();
     std::string msg = "Checked " + std::to_string(checked) + " mod(s), " +
                       std::to_string(available) + " update(s) available";
     if (failed != 0) msg += ", " + std::to_string(failed) + " check(s) failed";
@@ -422,10 +466,16 @@ bool ModManager::reload_installed() {
 
     pz::flat_set<std::uint64_t> present;
     for (const auto& mod : db_) present.insert(mod.workshop_id);
+    bool updates_changed = false;
     for (auto it = updates_.begin(); it != updates_.end();) {
-        if (present.count(it->first) == 0) it = updates_.erase(it);
-        else ++it;
+        if (present.count(it->first) == 0) {
+            it = updates_.erase(it);
+            updates_changed = true;
+        } else {
+            ++it;
+        }
     }
+    if (updates_changed) save_update_state();
     return !same_mods(previous, db_) || old_version != game_version_;
 }
 
@@ -649,6 +699,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
     db_.insert(db_.end(), fresh.begin(), fresh.end());
     updates_[id] = false;
     save_db();
+    save_update_state();
 
     // The old copy exists only to roll back a failed move. Delete it after a
     // successful install so a replaced mod never permanently uses twice the
@@ -1041,6 +1092,18 @@ void ModManager::load_db() {
     });
 }
 
+void ModManager::load_update_state() {
+    updates_.clear();
+    for_each_line(updates_path(), [&](const std::string& line) {
+        const auto parts = split_fields(line, '\t');
+        if (parts.empty()) return;
+        std::uint64_t workshop_id = 0;
+        if (!parse_stored_number(parts[0], workshop_id)) return;
+        if (parts.size() >= 2 && parts[1] == "0") return;
+        if (is_installed(workshop_id)) updates_[workshop_id] = true;
+    });
+}
+
 void ModManager::save_db() const {
     std::string text;
     for (const auto& m : db_) {
@@ -1056,5 +1119,15 @@ void ModManager::save_db() const {
         text += '\n';
     }
     write_text_atomic(db_path(), text);
+}
+
+void ModManager::save_update_state() const {
+    std::string text;
+    for (const auto& entry : updates_) {
+        if (!entry.second) continue;
+        text += std::to_string(entry.first);
+        text += "\t1\n";
+    }
+    write_text_atomic(updates_path(), text);
 }
 }  // namespace pz

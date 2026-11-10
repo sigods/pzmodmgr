@@ -21,6 +21,10 @@ public:
     // Changes the Zomboid base folder, recomputes derived paths, and reloads
     // the installed-mod database from the new data_dir.
     Result set_zomboid_dir(const fs::path& dir);
+    // Disables every Mod ID belonging to the item in default.txt, all save
+    // mods.txt files, and all server INIs before deleting its folders. A list
+    // that cannot be written aborts the removal so no enabled mod is left
+    // pointing at missing files.
     Result remove(std::uint64_t workshop_id, const LogFn& log);
     Result update_one(std::uint64_t workshop_id, const LogFn& log);
     Result update_all(const LogFn& log);
@@ -83,6 +87,7 @@ private:
     bool app_update_available_ = false;
 
     fs::path db_path() const { return cfg_.data_dir / "installed.tsv"; }
+    fs::path updates_path() const { return cfg_.data_dir / "updates.tsv"; }
     fs::path last_check_path() const { return cfg_.data_dir / "last_check"; }
     fs::path last_app_check_path() const { return cfg_.data_dir / "last_app_check"; }
     fs::path app_update_path() const { return cfg_.data_dir / "app_update"; }
@@ -92,12 +97,16 @@ private:
     void record_app_update_check() const;
     void load_app_update_state();
     void load_db();
+    void load_update_state();
     void save_db() const;
+    void save_update_state() const;
     Result install(std::uint64_t id, std::uint64_t remote_time, const LogFn& log,
                    bool* changed = nullptr, bool enable_new = false);
     Result install_collection(std::uint64_t collection_id,
                               const std::vector<std::uint64_t>& children,
                               const LogFn& log);
+    Result disable_mod_ids(const std::vector<std::string>& mod_ids,
+                           int& disabled_targets, const LogFn& log);
     bool is_installed(std::uint64_t id) const;
     std::vector<std::uint64_t> unique_installed_ids() const;
     std::uint64_t recorded_time(std::uint64_t id) const;

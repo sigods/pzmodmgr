@@ -45,8 +45,10 @@ INI's `Mods=` line. Multi-folder Workshop items enable only the newest
 game-compatible variant. Manual mods that are not
 in `installed.tsv` are listed too and can be enabled or disabled by folder.
 `Share server` copies the server's enabled Workshop IDs as a space-separated
-list that can be pasted into `Add` on another instance. No password is stored:
-run steamcmd manually once so its login is cached.
+list that can be pasted into `Add` on another instance. Removing an item first
+disables its Mod IDs in `mods/default.txt`, every save's `mods.txt`, and every
+server `.ini`; removal stops if one of those files cannot be written. No password
+is stored: run steamcmd manually once so its login is cached.
 
 Normal runs use the real `~/Zomboid/mods` folder (`%USERPROFILE%\Zomboid\mods`
 on Windows). For a custom Zomboid location (for example a game launched with
@@ -55,7 +57,7 @@ run the Windows setup with `/ZOMBOIDDIR=C:\absolute\path`; it can also be
 changed later in Settings. Installed builds read and write `config.ini` next to
 the executable, so no bootstrap config is created in the default Zomboid folder.
 The manager then uses that folder's `mods` and `pzmodmgr` subfolders;
-`installed.tsv`, downloads, the temporary copy used during a replacement,
+`installed.tsv`, `updates.tsv`, downloads, the temporary copy used during a replacement,
 `last_check`, `last_app_check`, and the cached app release state follow the
 configured folder. The old copy is deleted after a successful swap, so updates
 do not leave a growing backup pile. Source/portable builds without an adjacent `config.ini` keep the old

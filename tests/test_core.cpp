@@ -933,15 +933,28 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(check_result.ok, "check_updates succeeds: " + check_result.message);
     check(mm.update_available(123456789), "update availability recorded");
     check(read_file(steam_log) == downloads_before_check, "check does not download");
+    check(pz::fs::exists(cfg.data_dir / "updates.tsv"),
+          "update availability persisted");
     const std::uint64_t check_now = static_cast<std::uint64_t>(std::time(nullptr));
     write_file(cfg.data_dir / "last_app_check", std::to_string(check_now));
     check(!mm.update_check_due(), "recent update check is not due");
     check(pz::fs::exists(cfg.data_dir / "last_check"), "last check time persisted");
     {
         pz::ModManager restarted(cfg);
+        check(restarted.update_available(123456789),
+              "update availability survives restart without another check");
         check(!restarted.update_check_due(),
               "recent update check stays suppressed after restart");
     }
+    // A transient API failure must not erase a previously known update.
+    setenv("FAKE_CURL_EXIT", "1", 1);
+    log.clear();
+    auto failed_check = mm.check_updates(logfn);
+    check(failed_check.ok && mm.update_available(123456789),
+          "failed check preserves known update availability");
+    setenv("FAKE_CURL_EXIT", "0", 1);
+    set_json_time(1700000500);
+
     const auto now = static_cast<std::uint64_t>(std::time(nullptr));
     write_file(cfg.data_dir / "last_check", std::to_string(now - 86401));
     check(mm.update_check_due(), "update check is due after a day");
@@ -990,6 +1003,12 @@ exit "${FAKE_CURL_EXIT:-0}"
           "changed mod downloaded again");
     check(!pz::fs::exists(cfg.data_dir / "backups"),
           "successful update deletes the temporary old copy");
+    check(!mm.update_available(123456789), "successful update clears update availability");
+    {
+        pz::ModManager restarted(cfg);
+        check(!restarted.update_available(123456789),
+              "cleared update availability stays cleared after restart");
+    }
 
     // API failure: skip instead of blindly reinstalling.
     const std::string downloads_after_update = read_file(steam_log);
@@ -1224,6 +1243,40 @@ exit "${FAKE_CURL_EXIT:-0}"
                   std::string::npos,
           "server disable removes the Mod ID");
 
+    // Removing an item also disables it in every list: default.txt, saves, and
+    // server INIs. Enable all three targets before remove().
+    auto enable_default = mm.set_mods_enabled(pz::ActivationKind::Default, {}, {999},
+                                              true, logfn);
+    check(enable_default.ok, "default enable for remove succeeds: " + enable_default.message);
+    write_file(cfg.zomboid_dir / "Saves" / "Apocalypse" / "Save1" / "players.db", "");
+    auto enable_save = mm.set_mods_enabled(pz::ActivationKind::Save, "Apocalypse/Save1",
+                                           {999}, true, logfn);
+    check(enable_save.ok, "save enable for remove succeeds: " + enable_save.message);
+    auto enable_server_again = mm.set_mods_enabled(pz::ActivationKind::Server, "local",
+                                                   {999}, true, logfn);
+    check(enable_server_again.ok,
+          "server re-enable for remove succeeds: " + enable_server_again.message);
+
+    log.clear();
+    auto remove_enabled = mm.remove(999, logfn);
+    check(remove_enabled.ok, "remove disables activation targets: " + remove_enabled.message);
+    check(!pz::fs::exists(cfg.user_mods_dir / "FixtureMod999"),
+          "removed mod folder is gone");
+    check(read_file(cfg.user_mods_dir / "default.txt").find("mod = FixtureMod999,") ==
+              std::string::npos,
+          "remove disables the Mod ID in default.txt");
+    check(read_file(cfg.zomboid_dir / "Saves" / "Apocalypse" / "Save1" / "mods.txt")
+                  .find("mod = FixtureMod999,") == std::string::npos,
+          "remove disables the Mod ID in a save's mods.txt");
+    check(read_file(cfg.zomboid_dir / "Server" / "local.ini").find("FixtureMod999") ==
+              std::string::npos,
+          "remove disables the Mod ID in a server INI");
+    check(read_file(cfg.zomboid_dir / "Server" / "local.ini").find("WorkshopItems=999") !=
+              std::string::npos,
+          "remove leaves the server WorkshopItems entry alone");
+    check(remove_enabled.message.find("disabled in 3 mod list(s)") != std::string::npos,
+          "remove reports how many lists were updated: " + remove_enabled.message);
+
     // Opt-in auto-enable adds a new install to mods/default.txt.
     mm.config().auto_enable = true;
     setenv("FAKE_STEAMCMD_PER_ITEM", "1", 1);
@@ -1235,7 +1288,9 @@ exit "${FAKE_CURL_EXIT:-0}"
               std::string::npos,
           "auto-enable writes the plain Mod ID to default.txt");
     check(mm.remove(2020, logfn).ok, "auto-enable fixture removed");
-    check(mm.remove(999, logfn).ok, "activation fixture removed");
+    check(read_file(cfg.user_mods_dir / "default.txt").find("mod = FixtureMod2020,") ==
+              std::string::npos,
+          "remove disables an auto-enabled Mod ID in default.txt");
     mm.config().auto_enable = false;
     unsetenv("FAKE_STEAMCMD_PER_ITEM");
 
