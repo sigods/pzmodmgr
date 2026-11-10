@@ -33,6 +33,21 @@ if(PZMODMGR_SIZE_OPT AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
   add_link_options($<$<CONFIG:Release>:-Wl,--gc-sections>)
 endif()
 
+# Linux-only size tuning. -fno-plt calls imported functions through the GOT
+# instead of per-symbol PLT stubs; -z noseparate-code merges code and read-only
+# data into one load segment (still read+execute, never writable); build-id and
+# ident notes add metadata but no runtime value. Measured together: 8,480 bytes
+# off each stripped release binary.
+if(PZMODMGR_SIZE_OPT AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(
+      $<$<CONFIG:Release>:-fno-plt>
+      $<$<CONFIG:Release>:-fno-ident>)
+  add_link_options(
+      $<$<CONFIG:Release>:-Wl,-z,noseparate-code>
+      $<$<CONFIG:Release>:-Wl,--build-id=none>)
+endif()
+
 # Keep the shipped Linux binaries independent of the system C++ runtime. The
 # source-level C99 conversion is in progress; this removes the external
 # libstdc++/libgcc_s dependency for builds in the meantime.
