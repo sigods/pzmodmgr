@@ -64,8 +64,7 @@ size is primarily the two UIs and header-instantiated container code.
 On the unreleased `0.3.0` branch, the native-host-only change lowers that host
 from 125,080 to 96,408 bytes on Linux (-22.9%) and from 318,444 to 286,700 bytes
 on Windows (-9.97%). The unchanged app is still 463,161 bytes stripped and
-208,697 bytes with UPX; the smaller host payload takes the Windows setup from
-441,582 to 427,758 bytes and the ZIP from 449,983 to 433,777 bytes.
+208,697 bytes with UPX; the smaller host payload takes the Windows setupfrom 441,582 to 427,758 bytes and the ZIP from 449,983 to 433,732 bytes.
 
 ## Non-std binary and memory work
 

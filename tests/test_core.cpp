@@ -436,6 +436,43 @@ void test_read_mod_info(const pz::fs::path& root) {
     check(pz::version_range(pz::ModInfo{}).empty(), "empty version range stays empty");
 }
 
+void test_fixture_mod_info() {
+#ifdef PZMODMGR_TEST_FIXTURES
+    const pz::fs::path fixtures(PZMODMGR_TEST_FIXTURES);
+    const pz::fs::path basic = fixtures / "mod_info" / "basic";
+    auto info = pz::read_mod_info(basic);
+    check(info.has_value(), "fixture mod.info readable");
+    if (info) {
+        check(info->id == "fixturemod" && info->name == "Fixture Mod" &&
+                  info->author == "Fixture Author" && info->mod_version == "2.0",
+              "fixture mod.info fields parsed");
+        check(info->required_ids.size() == 2 &&
+                  info->required_ids[0] == "damnlib" &&
+                  info->required_ids[1] == "damnlibGlass",
+              "fixture requirements are trimmed, de-escaped, and deduplicated");
+        check(info->icon == basic / "art" / "icon.png", "fixture icon resolved");
+    }
+
+    auto single = pz::discover_mod_roots(fixtures / "discover" / "single");
+    check(single.size() == 1 && single[0].filename() == "single",
+          "fixture single-root discovery");
+
+    auto multi = pz::discover_mod_roots(fixtures / "discover" / "multi");
+    bool saw_a = false, saw_b = false;
+    for (const auto& root : multi) {
+        saw_a = saw_a || root.filename() == "A";
+        saw_b = saw_b || root.filename() == "B";
+    }
+    check(multi.size() == 2 && saw_a && saw_b, "fixture mods/ and Contents/mods/ discovery");
+
+    auto versioned = pz::discover_mod_roots(fixtures / "discover" / "versioned");
+    check(versioned.size() == 1 && versioned[0].filename() == "HorseMod",
+          "fixture versioned mod root discovery");
+#else
+    std::printf("SKIP: PZMODMGR_TEST_FIXTURES not defined\n");
+#endif
+}
+
 void test_missing_requirements(const pz::fs::path& root) {
     pz::Config cfg;
     cfg.zomboid_dir = root / "deps" / "Zomboid";
@@ -1371,6 +1408,7 @@ int main() {
     test_native_fs_copy(root);
     test_corrupt_db(root);
     test_read_mod_info(root);
+    test_fixture_mod_info();
     test_missing_requirements(root);
     test_discover_mod_roots(root);
     test_time_updated_parser();

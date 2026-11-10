@@ -148,7 +148,8 @@ if(UNIX)
   add_executable(pzcore_tests tests/test_core.cpp)
   target_link_libraries(pzcore_tests PRIVATE pzcore)
   target_compile_definitions(pzcore_tests PRIVATE
-                             FAKE_STEAMCMD_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fake_steamcmd.sh")
+                             FAKE_STEAMCMD_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fake_steamcmd.sh"
+                             PZMODMGR_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
   add_test(NAME pzcore_tests COMMAND pzcore_tests)
 
   find_package(Python3 COMPONENTS Interpreter QUIET)
