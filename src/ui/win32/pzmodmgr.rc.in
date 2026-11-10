@@ -4,8 +4,8 @@ IDI_PZMODMGR ICON "@PZMODMGR_ICON@"
 1 RT_MANIFEST "@PZMODMGR_MANIFEST@"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,0,0
- PRODUCTVERSION 0,2,0,0
+ FILEVERSION 0,2,5,0
+ PRODUCTVERSION 0,2,5,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -18,12 +18,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "pzmodmgr contributors"
             VALUE "FileDescription", "Project Zomboid Mod Manager"
-            VALUE "FileVersion", "0.2.4"
+            VALUE "FileVersion", "0.2.5"
             VALUE "InternalName", "pzmodmgr"
             VALUE "LegalCopyright", "Copyright (C) 2026 pzmodmgr contributors. GPL-3.0-only."
             VALUE "OriginalFilename", "pzmodmgr.exe"
             VALUE "ProductName", "PZ Mod Manager"
-            VALUE "ProductVersion", "0.2.4"
+            VALUE "ProductVersion", "0.2.5"
         END
     END
     BLOCK "VarFileInfo"
