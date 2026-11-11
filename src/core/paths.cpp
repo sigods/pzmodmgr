@@ -170,7 +170,7 @@ Config default_config() {
 void load_config(Config& c) {
     const fs::path file = c.config_file.empty() ? c.data_dir / "config.ini"
                                                 : c.config_file;
-    std::string steamcmd_exe, steam_user, zomboid_dir;
+    std::string steamcmd_exe, steamcmd_root, steam_user, zomboid_dir;
     bool dark_mode = false, has_dark_mode = false;
     bool auto_enable = false, has_auto_enable = false;
     for_each_line(file, [&](const std::string& line) {
@@ -179,6 +179,7 @@ void load_config(Config& c) {
         auto k = line.substr(0, eq);
         auto v = line.substr(eq + 1);
         if (k == "steamcmd_exe") steamcmd_exe = v;
+        else if (k == "steamcmd_root") steamcmd_root = v;
         else if (k == "steam_user") steam_user = v;
         else if (k == "zomboid_dir") zomboid_dir = v;
         else if (k == "dark_mode") {
@@ -207,6 +208,7 @@ void load_config(Config& c) {
         }
     }
     if (!steamcmd_exe.empty()) c.steamcmd_exe = steamcmd_exe;
+    if (!steamcmd_root.empty()) c.steamcmd_root = steamcmd_root;
     c.steam_user = steam_user;
     if (has_dark_mode) c.dark_mode = dark_mode;
     if (has_auto_enable) c.auto_enable = auto_enable;
@@ -217,6 +219,7 @@ bool save_config(const Config& c) {
                                                 : c.config_file;
     std::string text;
     text += "steamcmd_exe=" + c.steamcmd_exe.string() + "\n";
+    text += "steamcmd_root=" + c.steamcmd_root.string() + "\n";
     text += "steam_user=" + c.steam_user + "\n";
     text += "zomboid_dir=" + c.zomboid_dir.string() + "\n";
     text += std::string("dark_mode=") + (c.dark_mode ? "1" : "0") + "\n";

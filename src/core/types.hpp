@@ -40,6 +40,7 @@ private:
 
 struct Config {
     fs::path steamcmd_exe;        // built-in path, or a user-set override
+    fs::path steamcmd_root;       // SteamCMD install/download root (read-only for import)
     std::string steam_user;       // account that owns PZ; password is cached by steamcmd
     bool dark_mode = false;       // UI theme preference
     bool auto_enable = false;     // add newly installed mods to mods/default.txt
@@ -65,6 +66,9 @@ struct InstalledMod {
     // Manual update lock. Server-enabled items are locked dynamically too; this
     // flag only remembers a lock the user set for an item outside a server.
     bool locked = false;
+    // True when the files were copied in from an existing SteamCMD download
+    // root. The source tree is never modified or tracked in place.
+    bool imported = false;
 };
 
 struct Result {

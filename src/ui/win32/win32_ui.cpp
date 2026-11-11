@@ -22,10 +22,10 @@ namespace {
 constexpr int ID_INPUT = 101, ID_ADD = 102, ID_LIST = 103, ID_LOG = 104;
 constexpr int ID_UPDATE = 105, ID_REMOVE = 106, ID_UPDATE_ALL = 107, ID_SETTINGS = 108;
 constexpr int ID_SELECT_ALL = 109, ID_CLEAR = 110;
-constexpr int ID_FILTER = 111, ID_FILTER_ALL = 112, ID_FILTER_UPDATES = 113;
+constexpr int ID_FILTER = 111, ID_FILTER_MODE = 112;
 constexpr int ID_SORT = 114, ID_CHECK = 115, ID_COPY = 116, ID_ENABLE = 117;
 constexpr int ID_SHARE_SERVER = 118, ID_SELF_UPDATE = 119, ID_FILTER_CLEAR = 120;
-constexpr int ID_LOCK = 121;
+constexpr int ID_LOCK = 121, ID_IMPORT = 122;
 constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_THEME = 203, ID_SET_AUTO = 204;
 constexpr int ID_TGT_LIST = 301, ID_TGT_ENABLE = 302, ID_TGT_DISABLE = 303;
 constexpr int ID_TGT_COPY = 304, ID_TGT_CLOSE = 305, ID_TGT_COPY_NAMES = 306;
@@ -70,10 +70,10 @@ HWND g_brand_mark = nullptr;
 HWND g_brand_line = nullptr;
 HWND g_input = nullptr;
 HWND g_add = nullptr;
+HWND g_import = nullptr;
 HWND g_filter = nullptr;
 HWND g_filter_clear = nullptr;
-HWND g_filter_all = nullptr;
-HWND g_filter_updates = nullptr;
+HWND g_filter_combo = nullptr;
 HWND g_sort = nullptr;
 HWND g_check = nullptr;
 HWND g_list = nullptr;
@@ -101,6 +101,7 @@ HWND g_activity_label = nullptr;
 HWND g_settings_wnd = nullptr;
 HWND g_set_zomboid = nullptr;
 HWND g_set_path = nullptr;
+HWND g_set_root = nullptr;
 HWND g_set_user = nullptr;
 HWND g_set_auto = nullptr;
 bool g_settings_dark = false;
@@ -146,7 +147,10 @@ std::vector<char> g_row_updates;
 std::vector<char> g_row_locked;
 std::vector<std::uint64_t> g_selected_ids;
 std::vector<std::string> g_selected_folders;
-bool g_only_updates = false;
+ModFilter g_filter_mode = ModFilter::All;
+ModFilterCounts g_filter_counts;
+std::vector<ModFilter> g_filter_choices;
+bool g_filter_combo_updating = false;
 int g_sort_mode = 0;
 pz::flat_map<std::string, HBITMAP> g_icons;
 pz::flat_map<std::string, HBITMAP> g_target_icons;
@@ -352,6 +356,7 @@ void refresh_theme(HWND hwnd, bool dark) {
     apply_dark_title_bar(hwnd, dark);
     apply_dark_control_theme(g_input, dark);
     apply_dark_control_theme(g_filter, dark);
+    apply_dark_control_theme(g_filter_combo, dark);
     apply_dark_control_theme(g_log, dark);
     invalidate_bars();
 }
@@ -746,10 +751,34 @@ void update_filter_clear() {
     InvalidateRect(g_filter_clear, nullptr, TRUE);
 }
 
+void refresh_filter_combo() {
+    if (!g_filter_combo) return;
+    if (!mod_filter_available(g_filter_mode, g_filter_counts))
+        g_filter_mode = ModFilter::All;
+
+    g_filter_choices.clear();
+    g_filter_choices.push_back(ModFilter::All);
+    if (g_filter_counts.updates > 0) g_filter_choices.push_back(ModFilter::Updates);
+    if (g_filter_counts.locked > 0) g_filter_choices.push_back(ModFilter::Locked);
+    if (g_filter_counts.nontracked > 0) g_filter_choices.push_back(ModFilter::Nontracked);
+
+    g_filter_combo_updating = true;
+    SendMessageW(g_filter_combo, CB_RESETCONTENT, 0, 0);
+    int selected = 0;
+    for (std::size_t i = 0; i < g_filter_choices.size(); ++i) {
+        const std::string label = mod_filter_label(g_filter_choices[i], g_filter_counts);
+        SendMessageW(g_filter_combo, CB_ADDSTRING, 0, (LPARAM)to_w(label).c_str());
+        if (g_filter_choices[i] == g_filter_mode) selected = static_cast<int>(i);
+    }
+    SendMessageW(g_filter_combo, CB_SETCURSEL, selected, 0);
+    g_filter_combo_updating = false;
+}
+
 void update_actions() {
     const bool has_ids = !g_selected_ids.empty();
     const bool has_any = has_ids || !g_selected_folders.empty();
     EnableWindow(g_add, !g_busy);
+    EnableWindow(g_import, !g_busy);
     EnableWindow(g_update_all, !g_busy);
     EnableWindow(g_settings_btn, !g_busy);
     EnableWindow(g_self_update, !g_busy && g_app_update_available);
@@ -768,9 +797,8 @@ void update_actions() {
     EnableWindow(g_update, !g_busy && has_ids);
     EnableWindow(g_remove, !g_busy && has_ids);
     EnableWindow(g_filter, !g_busy);
-    EnableWindow(g_filter_all, !g_busy);
+    EnableWindow(g_filter_combo, !g_busy);
     update_filter_clear();
-    EnableWindow(g_filter_updates, !g_busy);
     EnableWindow(g_sort, !g_busy);
     EnableWindow(g_check, !g_busy);
 }
@@ -936,9 +964,12 @@ void refresh_list() {
     g_activation = g_mm->activation_targets();
 
     const std::string filter = read_edit(g_filter);
-    auto visible = visible_mods(g_mm->list_all(), filter, g_only_updates, g_sort_mode,
-        [&](std::uint64_t id) { return g_mm->update_available(id); });
-    for (auto& m : visible) m.locked = g_mm->locked(m.workshop_id);
+    const auto rows = mod_rows(g_mm->list_all(),
+        [&](std::uint64_t id) { return g_mm->update_available(id); },
+        [&](std::uint64_t id) { return g_mm->locked(id); });
+    g_filter_counts = mod_filter_counts(rows);
+    refresh_filter_combo();
+    auto visible = filter_mod_rows(rows, filter, g_filter_mode, g_sort_mode);
 
     for (const auto& m : visible) {
         const auto& info = info_for_cached(m.folders.front());
@@ -962,7 +993,7 @@ void refresh_list() {
         g_row_folders.push_back(m.folders.front());
         g_row_icon_paths.push_back(info && !info->icon.empty() ? info->icon.string()
                                                               : std::string{});
-        g_row_updates.push_back(g_mm->update_available(m.workshop_id) ? 1 : 0);
+        g_row_updates.push_back(m.update_available ? 1 : 0);
         g_row_locked.push_back(m.locked ? 1 : 0);
         LRESULT added = SendMessageW(g_list, LB_ADDSTRING, 0,
                                      (LPARAM)g_row_names.back().c_str());
@@ -993,14 +1024,14 @@ void refresh_list() {
     }
 
     if (g_empty) {
-        const bool filtered = !filter.empty() || g_only_updates;
+        const bool filtered = !filter.empty() || g_filter_mode != ModFilter::All;
         SetWindowTextW(g_empty,
             filtered ? L"No mods match the current filters."
                      : L"No mods installed yet. Paste a Workshop link above to begin.");
         ShowWindow(g_empty, g_row_ids.empty() ? SW_SHOW : SW_HIDE);
     }
     SetWindowTextW(g_sort, g_sort_mode == 0 ? L"Sort: Name" : L"Sort: Updated");
-    for (HWND b : {g_filter_all, g_filter_updates, g_sort}) InvalidateRect(b, nullptr, TRUE);
+    InvalidateRect(g_sort, nullptr, TRUE);
     sync_bars();
     update_actions();
     set_details();
@@ -1409,8 +1440,7 @@ void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color) {
     case ID_SELECT_ALL: glyph = &glyphs::kSelectAll; break;
     case ID_CLEAR: glyph = &glyphs::kClear; break;
     case ID_LOCK: glyph = &glyphs::kLock; break;
-    case ID_FILTER_ALL:
-    case ID_FILTER_UPDATES: glyph = &glyphs::kFilter; break;
+    case ID_FILTER_MODE: glyph = &glyphs::kFilter; break;
     case ID_SORT: glyph = &glyphs::kSort; break;
     default: return;   // Check intentionally has no glyph.
     }
@@ -1428,8 +1458,6 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     if (!dis) return;
     const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
     const bool pressed = (dis->itemState & ODS_SELECTED) != 0;
-    const bool active_chip = (id == ID_FILTER_ALL && !g_only_updates) ||
-                             (id == ID_FILTER_UPDATES && g_only_updates);
     RECT r = dis->rcItem;
     HBRUSH fill_brush = g_card_brush;
     HBRUSH border_brush = g_border_brush;
@@ -1439,11 +1467,6 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
         fill_brush = g_bg_brush;
         text_color = g_theme.muted;
         icon_color = g_theme.muted;
-    } else if (active_chip) {
-        fill_brush = g_brand_soft_brush;
-        border_brush = g_brand_brush;
-        text_color = g_theme.brand;
-        icon_color = g_theme.brand;
     } else if (primary) {
         fill_brush = g_accent_brush;
         border_brush = g_accent_brush;
@@ -1469,7 +1492,7 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     HGDIOBJ old = SelectObject(dis->hDC, g_font_body);
     SIZE size{};
     GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
-    const bool show_icon = id != ID_SETTINGS && id != ID_CHECK &&
+    const bool show_icon = id != ID_IMPORT && id != ID_SETTINGS && id != ID_CHECK &&
                            id != ID_SELF_UPDATE;
     const int icon_w = show_icon ? 18 : 0;
     const int gap = show_icon ? 7 : 0;
@@ -1479,6 +1502,33 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     RECT text_rc{start + icon_w + gap, r.top, r.right - 4, r.bottom};
     DrawTextW(dis->hDC, label, -1, &text_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dis->hDC, old);
+}
+
+void draw_filter_combo_item(const DRAWITEMSTRUCT* dis) {
+    if (!dis || dis->itemID == (UINT)-1) return;
+    wchar_t label[160]{};
+    SendMessageW(dis->hwndItem, CB_GETLBTEXT, (WPARAM)dis->itemID, (LPARAM)label);
+
+    const bool edit = (dis->itemState & ODS_COMBOBOXEDIT) != 0;
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    RECT r = dis->rcItem;
+    HBRUSH background = edit ? g_card_brush
+        : (selected ? g_brand_soft_brush : g_bg_brush);
+    FillRect(dis->hDC, &r, background);
+
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, selected ? g_theme.brand : g_theme.text);
+    HGDIOBJ old = SelectObject(dis->hDC, g_font_small);
+    int text_left = r.left + 5;
+    if (edit) {
+        draw_button_icon(dis->hDC, ID_FILTER_MODE, r.left + 4,
+                         (r.top + r.bottom) / 2, g_theme.brand);
+        text_left += 18 + 6;
+    }
+    RECT text_rc{text_left, r.top, r.right - 4, r.bottom};
+    DrawTextW(dis->hDC, label, -1, &text_rc,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     SelectObject(dis->hDC, old);
 }
 
@@ -1575,11 +1625,11 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
 }
 
 // Settings dialog layout, mirroring the X11 panel.
-constexpr int kSetClientW = 660, kSetClientH = 470;
-constexpr int kSetPanelX = 24, kSetPanelY = 72, kSetPanelW = 612, kSetPanelH = 380;
+constexpr int kSetClientW = 660, kSetClientH = 600;
+constexpr int kSetPanelX = 24, kSetPanelY = 72, kSetPanelW = 612, kSetPanelH = 500;
 constexpr int kSetFieldX = 56, kSetFieldW = 548, kSetFieldH = 38;
-constexpr int kSetZomboidY = 116, kSetPathY = 190, kSetUserY = 264;
-constexpr int kSetCheckY = 310, kSetButtonsY = 396;
+constexpr int kSetZomboidY = 116, kSetPathY = 190, kSetRootY = 264;
+constexpr int kSetUserY = 338, kSetCheckY = 384, kSetButtonsY = 458;
 
 // Targets dialog: the same panel as Settings, with a borderless list.
 constexpr int kTgtListX = 56, kTgtListY = 104, kTgtListW = 548, kTgtListH = 264;
@@ -1610,6 +1660,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             };
             g_set_zomboid = make_field(kSetZomboidY);
             g_set_path = make_field(kSetPathY);
+            g_set_root = make_field(kSetRootY);
             g_set_user = make_field(kSetUserY);
 
             g_set_auto = CreateWindowW(L"BUTTON",
@@ -1639,6 +1690,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowTextW(g_set_zomboid,
                        to_w(g_mm->config().zomboid_dir.string()).c_str());
         SetWindowTextW(g_set_path, to_w(g_mm->config().steamcmd_exe.string()).c_str());
+        SetWindowTextW(g_set_root,
+                       to_w(g_mm->config().steamcmd_root.string()).c_str());
         SetWindowTextW(g_set_user, to_w(g_mm->config().steam_user).c_str());
         SendMessageW(g_set_auto, BM_SETCHECK,
                      g_mm->config().auto_enable ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1692,9 +1745,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         label(92, L"Zomboid folder",
               L"Absolute path containing mods/ and pzmodmgr/", 150);
         label(166, L"steamcmd executable", L"Blank uses the built-in copy", 210);
-        label(240, L"Steam username", nullptr, 0);
+        label(240, L"SteamCMD download root",
+              L"Folder containing steamapps/workshop", 220);
+        label(314, L"Steam username", nullptr, 0);
 
-        for (HWND edit : {g_set_zomboid, g_set_path, g_set_user}) {
+        for (HWND edit : {g_set_zomboid, g_set_path, g_set_root, g_set_user}) {
             if (!edit) continue;
             RECT r{};
             GetWindowRect(edit, &r);
@@ -1704,12 +1759,12 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         SelectObject(dc, g_font_small);
         SetTextColor(dc, g_theme.muted);
-        RECT note{kSetFieldX, 336, kSetFieldX + kSetFieldW, 354};
+        RECT note{kSetFieldX, 412, kSetFieldX + kSetFieldW, 430};
         DrawTextW(dc,
                   L"No password is stored. Run steamcmd manually once so its "
                   L"login is cached.",
                   -1, &note, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        RECT note2{kSetFieldX, 354, kSetFieldX + kSetFieldW, 372};
+        RECT note2{kSetFieldX, 430, kSetFieldX + kSetFieldW, 448};
         DrawTextW(dc, L"Use anonymous for public Workshop items.", -1, &note2,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
@@ -1773,7 +1828,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_settings_dark = !g_settings_dark;
             refresh_theme(g_hwnd, g_settings_dark);
             apply_dark_title_bar(hwnd, g_settings_dark);
-            for (HWND edit : {g_set_zomboid, g_set_path, g_set_user})
+            for (HWND edit : {g_set_zomboid, g_set_path, g_set_root, g_set_user})
                 apply_dark_control_theme(edit, g_settings_dark);
             SetWindowTextW(GetDlgItem(hwnd, ID_SET_THEME),
                            g_settings_dark ? L"Theme: Dark" : L"Theme: Light");
@@ -1784,6 +1839,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (id == ID_SET_SAVE) {
             std::string zomboid = read_edit(g_set_zomboid);
             std::string path = read_edit(g_set_path);
+            std::string root = read_edit(g_set_root);
             std::string user = read_edit(g_set_user);
             if (user.empty()) {
                 MessageBoxW(hwnd, L"Steam username is required.", L"Settings",
@@ -1794,13 +1850,14 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) == BST_CHECKED;
             auto log = [](const std::string& s) { append_log(s); };
             auto r1 = run_command(*g_mm, "config steamcmd_exe " + path, log);
-            auto r2 = run_command(*g_mm, "config steam_user " + user, log);
-            auto r3 = run_command(*g_mm, "config zomboid_dir " + zomboid, log);
-            auto r4 = run_command(*g_mm, std::string("config dark_mode ") +
+            auto r2 = run_command(*g_mm, "config steamcmd_root " + root, log);
+            auto r3 = run_command(*g_mm, "config steam_user " + user, log);
+            auto r4 = run_command(*g_mm, "config zomboid_dir " + zomboid, log);
+            auto r5 = run_command(*g_mm, std::string("config dark_mode ") +
                                        (g_settings_dark ? "on" : "off"), log);
-            auto r5 = run_command(*g_mm, std::string("config auto_enable ") +
+            auto r6 = run_command(*g_mm, std::string("config auto_enable ") +
                                        (auto_enable ? "on" : "off"), log);
-            if (r1.ok && r2.ok && r3.ok && r4.ok && r5.ok) {
+            if (r1.ok && r2.ok && r3.ok && r4.ok && r5.ok && r6.ok) {
                 DestroyWindow(hwnd);
                 refresh_theme(g_hwnd, g_mm->config().dark_mode);
                 start_watcher(g_mm->config().data_dir);
@@ -1811,7 +1868,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 append_log("Settings saved");
             } else {
                 const auto& failed = !r1.ok ? r1
-                    : (!r2.ok ? r2 : (!r3.ok ? r3 : (!r4.ok ? r4 : r5)));
+                    : (!r2.ok ? r2 : (!r3.ok ? r3 : (!r4.ok ? r4
+                    : (!r5.ok ? r5 : r6))));
                 MessageBoxW(hwnd, to_w(failed.message).c_str(), L"Settings",
                             MB_OK | MB_ICONERROR);
             }
@@ -1835,6 +1893,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_set_auto = nullptr;
         g_set_zomboid = nullptr;
         g_set_path = nullptr;
+        g_set_root = nullptr;
         g_set_user = nullptr;
         return 0;
     }
@@ -2337,17 +2396,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             set_font(g_settings_btn, g_font_body);
 
             g_input = CreateWindowW(L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 24, 84, 644, 38,
+                WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 24, 84, 520, 38,
                 hwnd, (HMENU)ID_INPUT, nullptr, nullptr);
             set_font(g_input, g_font_body);
             set_edit_placeholder(g_input, L"Paste Workshop URLs or IDs");
             g_add = CreateWindowW(L"BUTTON", L"Install",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 684, 84, 212, 38, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 560, 84, 212, 38, hwnd,
                 (HMENU)ID_ADD, nullptr, nullptr);
+            set_font(g_add, g_font_body);
+            g_import = CreateWindowW(L"BUTTON", L"Import",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 784, 84, 112, 38, hwnd,
+                (HMENU)ID_IMPORT, nullptr, nullptr);
+            set_font(g_import, g_font_body);
             set_font(g_add, g_font_body);
 
             HWND label = CreateWindowW(L"STATIC",
-                L"Paste Workshop URLs or IDs separated by spaces. Press Enter to install; collections are supported.",
+                L"Press Enter to install, or Import a URL/ID to track an existing local copy.",
                 WS_CHILD | WS_VISIBLE, 24, 132, 872, 18, hwnd, nullptr, nullptr, nullptr);
             set_font(label, g_font_small);
 
@@ -2363,19 +2427,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | BS_OWNERDRAW, 282, 159, 20, 22, hwnd,
                 (HMENU)ID_FILTER_CLEAR, nullptr, nullptr);
             set_font(g_filter_clear, g_font_small);
-            g_filter_all = CreateWindowW(L"BUTTON", L"All",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 312, 158, 60, 24, hwnd,
-                (HMENU)ID_FILTER_ALL, nullptr, nullptr);
-            g_filter_updates = CreateWindowW(L"BUTTON", L"Updates",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 378, 158, 112, 24, hwnd,
-                (HMENU)ID_FILTER_UPDATES, nullptr, nullptr);
+            g_filter_combo = CreateWindowW(L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
+                    CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
+                312, 158, 170, 200, hwnd, (HMENU)ID_FILTER_MODE, nullptr, nullptr);
+            set_font(g_filter_combo, g_font_small);
             g_check = CreateWindowW(L"BUTTON", L"Check updates",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 496, 158, 120, 24, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 492, 158, 120, 24, hwnd,
                 (HMENU)ID_CHECK, nullptr, nullptr);
             g_sort = CreateWindowW(L"BUTTON", L"Sort: Name",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 626, 158, 140, 24, hwnd,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 622, 158, 140, 24, hwnd,
                 (HMENU)ID_SORT, nullptr, nullptr);
-            for (HWND b : {g_filter_all, g_filter_updates, g_check, g_sort})
+            for (HWND b : {g_check, g_sort})
                 set_font(b, g_font_small);
             g_count = CreateWindowW(L"STATIC", L"0 mods",
                 WS_CHILD | WS_VISIBLE | SS_RIGHT, 776, 158, 120, 18, hwnd, nullptr,
@@ -2524,6 +2587,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetBkColor((HDC)wp, g_theme.bg);
         return (LRESULT)g_bg_brush;
     }
+    case WM_MEASUREITEM: {
+        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+        if (wp == ID_FILTER_MODE) {
+            mis->itemHeight = 22;
+            return TRUE;
+        }
+        return FALSE;
+    }
     case WM_DRAWITEM: {
         auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
         if (wp == ID_LIST) {
@@ -2534,12 +2605,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             draw_filter_clear(dis);
             return TRUE;
         }
+        if (wp == ID_FILTER_MODE) {
+            draw_filter_combo_item(dis);
+            return TRUE;
+        }
         if (wp == ID_ADD || wp == ID_UPDATE || wp == ID_REMOVE ||
             wp == ID_UPDATE_ALL || wp == ID_SELECT_ALL || wp == ID_CLEAR ||
             wp == ID_LOCK || wp == ID_COPY || wp == ID_SETTINGS || wp == ID_ENABLE ||
-            wp == ID_SHARE_SERVER || wp == ID_FILTER_ALL ||
-            wp == ID_FILTER_UPDATES || wp == ID_SORT || wp == ID_CHECK ||
-            wp == ID_SELF_UPDATE) {
+            wp == ID_IMPORT || wp == ID_SHARE_SERVER || wp == ID_SORT ||
+            wp == ID_CHECK || wp == ID_SELF_UPDATE) {
             draw_flat_button(dis, (int)wp, wp == ID_ADD);
             return TRUE;
         }
@@ -2550,6 +2624,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_ADD:
             add_input();
             return 0;
+        case ID_IMPORT: {
+            const std::string pasted = read_edit(g_input);
+            std::string cmd = "import";
+            if (!pasted.empty()) {
+                cmd += " " + pasted;
+                SetWindowTextW(g_input, L"");
+            }
+            start_command(cmd);
+            return 0;
+        }
         case ID_UPDATE:
             update_selected();
             return 0;
@@ -2596,13 +2680,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             update_filter_clear();
             SetFocus(g_filter);
             return 0;
-        case ID_FILTER_ALL:
-            g_only_updates = false;
-            refresh_list();
-            return 0;
-        case ID_FILTER_UPDATES:
-            g_only_updates = true;
-            refresh_list();
+        case ID_FILTER_MODE:
+            if (HIWORD(wp) == CBN_SELCHANGE && !g_filter_combo_updating) {
+                const int selected = (int)SendMessageW(g_filter_combo, CB_GETCURSEL, 0, 0);
+                if (selected >= 0 && selected < (int)g_filter_choices.size()) {
+                    g_filter_mode = g_filter_choices[(std::size_t)selected];
+                    refresh_list();
+                }
+            }
             return 0;
         case ID_SORT:
             g_sort_mode = 1 - g_sort_mode;
@@ -2682,7 +2767,10 @@ int run_ui(ModManager& mm) {
     g_mm = &mm;
     g_busy = false;
     g_reload_pending = false;
-    g_only_updates = false;
+    g_filter_mode = ModFilter::All;
+    g_filter_counts = {};
+    g_filter_choices.clear();
+    g_filter_combo_updating = false;
     g_sort_mode = 0;
     g_selected_ids.clear();
     g_selected_folders.clear();

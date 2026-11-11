@@ -18,6 +18,14 @@ public:
     explicit ModManager(Config cfg);
 
     Result add(const std::string& url_or_id, const LogFn& log);
+    // Imports valid mods already downloaded under Config::steamcmd_root into
+    // user_mods_dir. The SteamCMD tree is read-only: files are copied, never
+    // moved, rewritten, or removed. IDs already tracked or with an existing
+    // destination are skipped. When only_ids is non-empty, only those Workshop
+    // items are considered, so a pasted URL/id does not need steamcmd.
+    Result import_steamcmd(const LogFn& log);
+    Result import_steamcmd(const LogFn& log,
+                           const std::vector<std::uint64_t>& only_ids);
     // Changes the Zomboid base folder, recomputes derived paths, and reloads
     // the installed-mod database from the new data_dir.
     Result set_zomboid_dir(const fs::path& dir);

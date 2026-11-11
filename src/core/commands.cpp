@@ -148,6 +148,12 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
     const auto [cmd, arg] = split_first_word(line);
 
     if (cmd == "add") return add_workshop_input(mm, arg, log);
+    if (cmd == "import") {
+        if (arg.empty()) return mm.import_steamcmd(log);
+        auto ids = parse_workshop_ids(arg);
+        if (ids.empty()) return {false, "expected Workshop URLs or IDs"};
+        return mm.import_steamcmd(log, ids);
+    }
     if (cmd == "remove") {
         auto ids = parse_workshop_ids(arg);
         if (ids.empty()) return {false, "expected a Workshop ID"};
@@ -295,6 +301,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         for (const auto& m : mods) {
             std::string line = m.name + " [" + m.folder + "] id=" +
                                std::to_string(m.workshop_id);
+            if (m.imported) line += " [imported]";
             if (m.locked) line += " [locked]";
             else if (mm.server_locked(m.workshop_id)) line += " [target lock]";
             log(line);
@@ -306,6 +313,8 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         auto& c = mm.config();
         if (key == "steamcmd_exe") {
             c.steamcmd_exe = value;
+        } else if (key == "steamcmd_root") {
+            c.steamcmd_root = value;
         } else if (key == "steam_user") {
             c.steam_user = value;
         } else if (key == "zomboid_dir") {

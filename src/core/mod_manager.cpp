@@ -100,6 +100,90 @@ std::string folded(std::string value) {
     return value;
 }
 
+struct AcfWorkshopItem {
+    std::uint64_t id = 0;
+    std::uint64_t time_updated = 0;
+};
+
+void add_unique(std::vector<AcfWorkshopItem>& values,
+                const AcfWorkshopItem& value) {
+    if (value.id == 0) return;
+    for (const auto& existing : values)
+        if (existing.id == value.id) return;
+    values.push_back(value);
+}
+
+bool all_digits(const std::string& value) {
+    return !value.empty() &&
+           value.find_first_not_of("0123456789") == std::string::npos;
+}
+
+// Reads item IDs and their timeupdated values from WorkshopItemsInstalled in
+// appworkshop_108600.acf. The section is a nested KeyValues block: item IDs are
+// quoted numeric keys at its first level, and each item has string properties.
+// Returns false when the section is absent so the caller can scan content/.
+bool read_acf_workshop_items(const fs::path& file,
+                             std::vector<AcfWorkshopItem>& items) {
+    std::string text;
+    if (!read_text_file(file, text)) return false;
+
+    const std::size_t section = text.find("\"WorkshopItemsInstalled\"");
+    if (section == std::string::npos) return false;
+    const std::size_t open = text.find('{', section + 23);
+    if (open == std::string::npos) return false;
+
+    int depth = 0;
+    bool active = false;
+    AcfWorkshopItem current;
+    for (std::size_t i = open; i < text.size();) {
+        const char c = text[i];
+        if (c == '"') {
+            const std::size_t start = ++i;
+            while (i < text.size() && text[i] != '"') {
+                if (text[i] == '\\' && i + 1 < text.size()) ++i;
+                ++i;
+            }
+            if (i >= text.size()) break;
+            const std::string token = text.substr(start, i - start);
+            ++i;
+
+            std::size_t next = i;
+            while (next < text.size() &&
+                   std::isspace(static_cast<unsigned char>(text[next]))) ++next;
+
+            std::uint64_t number = 0;
+            if (depth == 1 && !active && all_digits(token) &&
+                parse_stored_number(token, number) && next < text.size() &&
+                text[next] == '{') {
+                current = {};
+                current.id = number;
+                active = true;
+            } else if (depth == 2 && active && token == "timeupdated" &&
+                       next < text.size() && text[next] == '"') {
+                const std::size_t value_start = ++next;
+                while (next < text.size() && text[next] != '"') ++next;
+                std::uint64_t value = 0;
+                if (parse_stored_number(
+                        text.substr(value_start, next - value_start), value))
+                    current.time_updated = value;
+            }
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            if (depth == 2 && active) {
+                items.push_back(current);
+                active = false;
+            }
+            --depth;
+            if (depth == 0) break;
+        }
+        ++i;
+    }
+    return true;
+}
+
 void add_unique(std::vector<std::string>& values, const std::string& value) {
     if (!value.empty() && std::find(values.begin(), values.end(), value) == values.end())
         values.push_back(value);
@@ -144,7 +228,8 @@ bool same_mods(const std::vector<InstalledMod>& a,
             a[i].folder != b[i].folder ||
             a[i].name != b[i].name ||
             a[i].time_updated != b[i].time_updated ||
-            a[i].owned != b[i].owned || a[i].locked != b[i].locked) return false;
+            a[i].owned != b[i].owned || a[i].locked != b[i].locked ||
+            a[i].imported != b[i].imported) return false;
     }
     return true;
 }
@@ -259,6 +344,310 @@ Result ModManager::add(const std::string& input, const LogFn& log) {
 
     if (is_installed(*id)) return {false, "Already installed. Use: update"};
     return install(*id, fetch_remote_time_updated(*id), log, nullptr, true);
+}
+
+Result ModManager::import_steamcmd(const LogFn& log) {
+    return import_steamcmd(log, {});
+}
+
+Result ModManager::import_steamcmd(const LogFn& log,
+                                   const std::vector<std::uint64_t>& only_ids) {
+    const bool explicit_request = !only_ids.empty();
+    bool have_root = !cfg_.steamcmd_root.empty();
+    if (!have_root && !explicit_request)
+        return {false, "Set the SteamCMD download root in Settings first"};
+
+    fs::path root;
+    pz::error_code ec;
+    if (have_root) {
+        root = cfg_.steamcmd_root.lexically_normal();
+        if (!root.is_absolute()) {
+            if (!explicit_request)
+                return {false, "SteamCMD download root must be an absolute path: " +
+                                   cfg_.steamcmd_root.string()};
+            have_root = false;
+        } else if (!fs::is_directory(root, ec)) {
+            if (!explicit_request)
+                return {false, "SteamCMD download root not found: " + root.string()};
+            have_root = false;
+        } else if (root == cfg_.user_mods_dir || root == cfg_.data_dir) {
+            return {false,
+                    "The SteamCMD download root cannot be the Zomboid mods or data folder"};
+        }
+    }
+    if (!have_root)
+        log("import: SteamCMD downloads unavailable; matching local folders by Workshop title");
+
+    const fs::path content_root = have_root
+        ? root / "steamapps" / "workshop" / "content" /
+              std::to_string(kProjectZomboidAppId)
+        : fs::path{};
+    const fs::path acf = have_root
+        ? root / "steamapps" / "workshop" /
+              ("appworkshop_" + std::to_string(kProjectZomboidAppId) + ".acf")
+        : fs::path{};
+
+    std::vector<AcfWorkshopItem> acf_items;
+    bool read_acf = false;
+    if (have_root && fs::is_regular_file(acf, ec))
+        read_acf = read_acf_workshop_items(acf, acf_items);
+
+    std::vector<AcfWorkshopItem> discovered;
+    if (!only_ids.empty()) {
+        // An explicit URL/id list targets only those already-downloaded items.
+        // This path never invokes steamcmd, so it also works after the
+        // executable has been removed or the cached login is gone.
+        for (auto id : only_ids) {
+            AcfWorkshopItem item{id, 0};
+            for (const auto& known : acf_items) {
+                if (known.id != id) continue;
+                item.time_updated = known.time_updated;
+                break;
+            }
+            add_unique(discovered, item);
+        }
+    } else if (read_acf) {
+        discovered = acf_items;
+    } else {
+        // No usable ACF: the content folders themselves are the source of truth.
+        fs::directory_iterator entries(content_root, ec);
+        if (!ec) {
+            for (const auto& entry : entries) {
+                if (!entry.is_directory(ec)) continue;
+                std::uint64_t id = 0;
+                if (!parse_stored_number(entry.path().filename().string(), id)) continue;
+                add_unique(discovered, AcfWorkshopItem{id, 0});
+            }
+        }
+    }
+    std::sort(discovered.begin(), discovered.end(),
+              [](const AcfWorkshopItem& a, const AcfWorkshopItem& b) {
+                  return a.id < b.id;
+              });
+    if (discovered.empty())
+        return {true, "No Workshop items found in " + root.string()};
+
+    pz::flat_set<std::string> installed_copies;
+    pz::flat_set<std::string> tracked_mod_ids;
+    struct LocalCandidate {
+        std::string folder;
+        std::string name;
+        std::string mod_id;
+    };
+    std::vector<LocalCandidate> untracked;
+    for (const auto& mod : list_all()) {
+        auto info = read_mod_info(cfg_.user_mods_dir / mod.folder, game_version_);
+        if (!info || info->id.empty()) continue;
+        installed_copies.insert(folded(info->id));
+        if (mod.workshop_id == 0) {
+            untracked.push_back({mod.folder,
+                                 info->name.empty() ? mod.folder : info->name,
+                                 info->id});
+        } else {
+            tracked_mod_ids.insert(folded(info->id));
+        }
+    }
+
+    int imported_items = 0, imported_folders = 0;
+    int skipped_tracked = 0, skipped_installed = 0;
+    int skipped_missing = 0, skipped_invalid = 0;
+    int skipped_unmatched = 0, failed = 0;
+    pz::flat_set<std::string> adopted_folders;
+
+    // When the SteamCMD copy is gone, the Workshop title is the only stable
+    // link between an untracked Zomboid/mods folder and a pasted item ID.
+    // Adopt only one exact case-insensitive match and never move or rewrite
+    // the folder.
+    auto adopt_local = [&](std::uint64_t id) -> int {
+        const auto remote = fetch_remote_file_details(id);
+        if (remote.result != 1 || remote.title.empty()) {
+            log("import: " + std::to_string(id) +
+                " could not read Workshop details (skipped)");
+            return -1;
+        }
+        const std::string title = folded(remote.title);
+        std::vector<std::size_t> matches;
+        for (std::size_t i = 0; i < untracked.size(); ++i) {
+            const auto& candidate = untracked[i];
+            if (adopted_folders.count(folded(candidate.folder)) != 0) continue;
+            if (tracked_mod_ids.count(folded(candidate.mod_id)) != 0) continue;
+            if (folded(candidate.name) == title || folded(candidate.folder) == title)
+                matches.push_back(i);
+        }
+        if (matches.empty()) return 0;
+        if (matches.size() > 1) {
+            log("import: " + std::to_string(id) + " matches " +
+                std::to_string(matches.size()) +
+                " untracked folders by title (ambiguous, skipped)");
+            return -1;
+        }
+        const auto& candidate = untracked[matches.front()];
+        db_.push_back({id, candidate.folder, candidate.name, remote.time_updated,
+                       false, false, true});
+        adopted_folders.insert(folded(candidate.folder));
+        tracked_mod_ids.insert(folded(candidate.mod_id));
+        ++imported_items;
+        ++imported_folders;
+        log("imported " + std::to_string(id) + ": " + candidate.name +
+            " (tracked existing folder)");
+        return 1;
+    };
+
+    for (const auto& item : discovered) {
+        if (is_installed(item.id)) {
+            log("import: " + std::to_string(item.id) + " already tracked (skipped)");
+            ++skipped_tracked;
+            continue;
+        }
+
+        const fs::path source = content_root / std::to_string(item.id);
+        if (!have_root || !fs::is_directory(source, ec)) {
+            if (explicit_request) {
+                const int adopted = adopt_local(item.id);
+                if (adopted > 0) continue;
+                if (adopted < 0) {
+                    ++skipped_unmatched;
+                    continue;
+                }
+            }
+            log("import: " + std::to_string(item.id) + " has no content folder (skipped)");
+            ++skipped_missing;
+            continue;
+        }
+
+        struct SourceRoot {
+            fs::path path;
+            std::string folder;
+            std::string mod_id;
+            std::string name;
+        };
+        std::vector<SourceRoot> roots;
+        pz::flat_set<std::string> folders;
+        for (const auto& mod_root : discover_mod_roots(source)) {
+            auto info = read_mod_info(mod_root, game_version_);
+            if (!info || info->id.empty()) continue;
+            const std::string folder =
+                mod_root == source ? info->id : mod_root.filename().string();
+            if (folder.empty() || !folders.insert(folded(folder)).second) continue;
+            roots.push_back({mod_root, folder, info->id,
+                             info->name.empty() ? folder : info->name});
+        }
+        if (roots.empty()) {
+            // SteamCMD keeps the content directory when the user has already
+            // copied the mod into Zomboid/mods. If the matching folder is
+            // there, this is an installed copy, not a corrupt download.
+            bool already_present = false;
+            std::vector<std::string> candidates;
+            auto add_child_names = [&](const fs::path& base) {
+                pz::error_code scan_ec;
+                for (const auto& entry : fs::directory_iterator(base, scan_ec)) {
+                    if (!scan_ec && entry.is_directory(scan_ec))
+                        add_unique(candidates, entry.path().filename().string());
+                }
+            };
+            add_child_names(source / "mods");
+            add_child_names(source / "Contents" / "mods");
+            add_child_names(source);
+            add_unique(candidates, source.filename().string());
+            for (const auto& folder : candidates) {
+                if (folder.empty() || folder == "mods" || folder == "Contents" ||
+                    folder == "common")
+                    continue;
+                const fs::path dest = cfg_.user_mods_dir / folder;
+                auto info = read_mod_info(dest, game_version_);
+                if (!info || info->id.empty()) continue;
+                installed_copies.insert(folded(info->id));
+                already_present = true;
+                log("import: " + std::to_string(item.id) +
+                    " matches Zomboid/mods/" + folder + " (skipped)");
+            }
+            if (already_present) {
+                log("import: " + std::to_string(item.id) +
+                    " is already in Zomboid/mods (skipped)");
+                ++skipped_installed;
+            } else if (explicit_request) {
+                const int adopted = adopt_local(item.id);
+                if (adopted > 0) continue;
+                if (adopted < 0) {
+                    ++skipped_unmatched;
+                    continue;
+                }
+                log("import: " + std::to_string(item.id) +
+                    " has no valid mod.info or matching local title (skipped)");
+                ++skipped_invalid;
+            } else {
+                log("import: " + std::to_string(item.id) +
+                    " has no valid mod.info (skipped)");
+                ++skipped_invalid;
+            }
+            continue;
+        }
+
+        bool collision = false;
+        for (const auto& candidate : roots) {
+            if (fs::exists(cfg_.user_mods_dir / candidate.folder, ec) ||
+                installed_copies.count(folded(candidate.mod_id)) != 0) {
+                collision = true;
+                break;
+            }
+        }
+        if (collision) {
+            log("import: " + std::to_string(item.id) +
+                " is already installed (skipped)");
+            ++skipped_installed;
+            continue;
+        }
+
+        std::vector<fs::path> copied;
+        bool item_failed = false;
+        for (const auto& candidate : roots) {
+            const fs::path dest = cfg_.user_mods_dir / candidate.folder;
+            pz::error_code copy_ec;
+            if (!fs::copy(candidate.path, dest, fs::copy_options::recursive, copy_ec)) {
+                log("import: could not copy " + candidate.folder + ": " +
+                    copy_ec.message());
+                item_failed = true;
+                break;
+            }
+            copied.push_back(dest);
+        }
+        if (item_failed) {
+            for (const auto& dest : copied) {
+                pz::error_code cleanup_ec;
+                fs::remove_all(dest, cleanup_ec);
+            }
+            ++failed;
+            continue;
+        }
+
+        for (const auto& candidate : roots) {
+            db_.push_back({item.id, candidate.folder, candidate.name,
+                           item.time_updated, true, false, true});
+            installed_copies.insert(folded(candidate.mod_id));
+            ++imported_folders;
+        }
+        ++imported_items;
+        log("imported " + std::to_string(item.id) + ": " + roots.front().name);
+    }
+
+    if (imported_folders != 0) save_db();
+    std::string msg = "Imported " + std::to_string(imported_items) + " item(s), " +
+                      std::to_string(imported_folders) + " mod folder(s)";
+    if (skipped_tracked != 0)
+        msg += ", " + std::to_string(skipped_tracked) + " already tracked";
+    if (skipped_installed != 0)
+        msg += ", " + std::to_string(skipped_installed) + " already installed";
+    if (skipped_invalid != 0)
+        msg += ", " + std::to_string(skipped_invalid) + " without valid mod.info";
+    if (skipped_missing != 0)
+        msg += ", " + std::to_string(skipped_missing) + " missing content";
+    if (skipped_unmatched != 0)
+        msg += ", " + std::to_string(skipped_unmatched) + " without a unique local match";
+    if (failed != 0) msg += ", " + std::to_string(failed) + " copy failure(s)";
+    const bool requested_failed = explicit_request &&
+        (skipped_missing != 0 || skipped_invalid != 0 || skipped_unmatched != 0 ||
+         failed != 0);
+    return {!requested_failed, msg};
 }
 
 Result ModManager::remove(std::uint64_t id, const LogFn& log) {
@@ -774,11 +1163,13 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         bool tracked = false;
         bool was_owned = false;
         bool was_locked = false;
+        bool was_imported = false;
         for (const auto& m : db_) {
             if (m.workshop_id == id && m.folder == folder) {
                 tracked = true;
                 was_owned = m.owned;
                 was_locked = m.locked;
+                was_imported = m.imported;
                 break;
             }
         }
@@ -797,7 +1188,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
             log("kept existing " + folder + " (version " + info->mod_version + ")");
             if (!tracked) adopted_external = true;
             fresh.push_back({id, folder, info->name.empty() ? folder : info->name,
-                             remote_time, was_owned, was_locked});
+                             remote_time, was_owned, was_locked, was_imported});
             ++kept;
             continue;
         }
@@ -828,7 +1219,7 @@ Result ModManager::install(std::uint64_t id, std::uint64_t remote_time, const Lo
         replaced_any = true;
         log("installed " + folder + " (moved from download cache)");
         fresh.push_back({id, folder, info->name.empty() ? folder : info->name,
-                         remote_time, true, was_locked});
+                         remote_time, true, was_locked, was_imported});
     }
     if (fresh.empty()) {
         cleanup_cache();
@@ -1256,8 +1647,9 @@ void ModManager::load_db() {
             return;   // skip corrupt line
         const bool is_owned = !(parts.size() >= 5 && parts[4] == "0");
         const bool is_locked = parts.size() >= 6 && parts[5] != "0";
+        const bool is_imported = parts.size() >= 7 && parts[6] != "0";
         db_.push_back({workshop_id, parts[1], parts[2], time_updated, is_owned,
-                       is_locked});
+                       is_locked, is_imported});
     });
 }
 
@@ -1288,6 +1680,8 @@ void ModManager::save_db() const {
         text += m.owned ? '1' : '0';
         text += '\t';
         text += m.locked ? '1' : '0';
+        text += '\t';
+        text += m.imported ? '1' : '0';
         text += '\n';
     }
     write_text_atomic(db_path(), text);

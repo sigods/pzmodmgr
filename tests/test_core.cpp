@@ -124,6 +124,7 @@ void test_config_paths(const pz::fs::path& root) {
     cfg.data_dir = cfg.zomboid_dir / "pzmodmgr";
     cfg.config_file = cfg.data_dir / "config.ini";
     cfg.steamcmd_exe = pz::builtin_steamcmd_path(cfg);
+    cfg.steamcmd_root = root / "config-steamcmd-root";
     cfg.steam_user = "config-user";
 
     pz::ModManager mm(cfg);
@@ -143,6 +144,10 @@ void test_config_paths(const pz::fs::path& root) {
     check(read_file(cfg.config_file).find("zomboid_dir=" + custom.string()) !=
               std::string::npos,
           "config command persists the custom Zomboid dir");
+    auto root_saved = pz::run_command(
+        mm, "config steamcmd_root " + (root / "other-steamcmd").string(), log);
+    check(root_saved.ok && mm.config().steamcmd_root == root / "other-steamcmd",
+          "config command stores the SteamCMD download root");
 
     pz::Config loaded;
     loaded.config_file = cfg.config_file;
@@ -156,11 +161,147 @@ void test_config_paths(const pz::fs::path& root) {
     check(loaded.data_dir == custom / "pzmodmgr", "custom data dir loaded on restart");
     check(loaded.config_file == cfg.config_file, "bootstrap config path survives load");
     check(loaded.steam_user == cfg.steam_user, "steam user loads with custom path");
+    check(loaded.steamcmd_root == root / "other-steamcmd",
+          "SteamCMD download root loads with the other paths");
 
     const auto before = mm.config().zomboid_dir;
     auto relative = mm.set_zomboid_dir("relative/Zomboid");
     check(!relative.ok, "relative Zomboid dir rejected");
     check(mm.config().zomboid_dir == before, "rejected relative path changes nothing");
+}
+
+void test_steamcmd_import(const pz::fs::path& root) {
+    const pz::fs::path zombie = root / "import-zomboid";
+    const pz::fs::path steam = root / "import-steamcmd";
+    const pz::fs::path content =
+        steam / "steamapps" / "workshop" / "content" / "108600";
+
+    write_file(content / "111" / "mods" / "Alpha" / "mod.info",
+               "id=AlphaMod\nname=Alpha\nmodversion=1.0\n");
+    write_file(content / "111" / "mods" / "Alpha" / "source-marker.txt", "keep\n");
+    write_file(content / "222" / "Contents" / "mods" / "Beta" / "mod.info",
+               "id=BetaMod\nname=Beta\n");
+    pz::fs::create_directories(content / "333" / "mods" / "EmptyCopy");
+
+    const pz::fs::path acf =
+        steam / "steamapps" / "workshop" / "appworkshop_108600.acf";
+    write_file(acf,
+        "\"AppWorkshop\"\n{\n"
+        "\t\"appid\" \"108600\"\n"
+        "\t\"WorkshopItemsInstalled\"\n\t{\n"
+        "\t\t\"111\"\n\t\t{\n"
+        "\t\t\t\"size\" \"777\"\n"
+        "\t\t\t\"timeupdated\" \"1700002222\"\n"
+        "\t\t}\n"
+        "\t\t\"222\"\n\t\t{\n"
+        "\t\t\t\"timeupdated\" \"1700003333\"\n"
+        "\t\t}\n"
+        "\t\t\"333\" { }\n"
+        "\t\t\"444\" { }\n"
+        "\t}\n}\n");
+
+    pz::Config cfg;
+    cfg.zomboid_dir = zombie;
+    cfg.user_mods_dir = zombie / "mods";
+    cfg.data_dir = zombie / "pzmodmgr";
+    cfg.config_file = cfg.data_dir / "config.ini";
+    cfg.steamcmd_root = steam;
+
+    pz::ModManager mm(cfg);
+    std::vector<std::string> log;
+    auto logfn = [&log](const std::string& s) { log.push_back(s); };
+
+    auto imported = mm.import_steamcmd(logfn);
+    check(imported.ok, "SteamCMD import succeeds: " + imported.message);
+    check(imported.message.find("Imported 2 item(s), 2 mod folder(s)") !=
+              std::string::npos,
+          "ACF import reports both valid items: " + imported.message);
+    check(pz::fs::exists(cfg.user_mods_dir / "Alpha" / "mod.info") &&
+              pz::fs::exists(cfg.user_mods_dir / "Beta" / "mod.info"),
+          "valid SteamCMD mods copied into Zomboid/mods");
+    check(pz::fs::exists(content / "111" / "mods" / "Alpha" /
+                             "source-marker.txt"),
+          "import leaves the SteamCMD source files untouched");
+    auto records = mm.list();
+    check(records.size() == 2, "import tracks both copied folders");
+    bool saw_alpha = false;
+    for (const auto& record : records) {
+        if (record.folder != "Alpha") continue;
+        saw_alpha = true;
+        check(record.imported, "imported record carries the source flag");
+        check(record.owned, "imported copies are managed copies");
+        check(record.time_updated == 1700002222,
+              "import keeps the ACF timeupdated to avoid a false update");
+    }
+    check(saw_alpha, "Alpha record imported");
+    check(!pz::fs::exists(cfg.user_mods_dir / "EmptyCopy"),
+          "empty SteamCMD directory without mod.info is not imported");
+    check(std::find(log.begin(), log.end(),
+              "import: 444 has no content folder (skipped)") != log.end(),
+          "ACF item without content is skipped");
+
+    {
+        pz::ModManager restarted(cfg);
+        auto again = restarted.list();
+        check(again.size() == 2 && again[0].imported,
+              "imported flag survives installed.tsv reload");
+        auto second = restarted.import_steamcmd(logfn);
+        check(second.ok && second.message.find("Imported 0 item(s)") !=
+                  std::string::npos,
+              "second import skips tracked IDs: " + second.message);
+    }
+
+    // The user already copied this one into Zomboid/mods and emptied the
+    // SteamCMD folder. Matching the remaining directory name identifies it.
+    write_file(cfg.user_mods_dir / "EmptyCopy" / "mod.info",
+               "id=EmptyCopy\nname=Already copied\n");
+    write_file(cfg.user_mods_dir / "EmptyCopy" / "manual-marker.txt", "keep\n");
+    log.clear();
+    auto copied = mm.import_steamcmd(logfn);
+    check(copied.ok, "import with empty SteamCMD folders succeeds: " + copied.message);
+    check(copied.message.find("1 already installed") != std::string::npos,
+          "empty source folder matches the copied Zomboid mod: " + copied.message);
+    check(pz::fs::exists(cfg.user_mods_dir / "EmptyCopy" / "manual-marker.txt"),
+          "matching copied folder is not rewritten");
+
+    check(mm.remove(111, logfn).ok, "imported record removed");
+    check(!pz::fs::exists(cfg.user_mods_dir / "Alpha"),
+          "removing an imported record deletes only its Zomboid copy");
+    check(pz::fs::exists(content / "111" / "mods" / "Alpha" /
+                             "source-marker.txt"),
+          "removing an imported record leaves the SteamCMD source in place");
+
+    // A pasted URL/id targets one already-downloaded item and never calls
+    // steamcmd, so it still works without the executable or a cached login.
+    log.clear();
+    auto targeted = mm.import_steamcmd(logfn, {111});
+    check(targeted.ok, "targeted import succeeds: " + targeted.message);
+    check(targeted.message.find("Imported 1 item(s), 1 mod folder(s)") !=
+              std::string::npos,
+          "targeted import only reports the requested item: " + targeted.message);
+    check(pz::fs::exists(cfg.user_mods_dir / "Alpha" / "mod.info"),
+          "targeted import restores the requested SteamCMD item");
+    check(std::find(log.begin(), log.end(),
+              "import: 444 has no content folder (skipped)") == log.end(),
+          "targeted import does not scan unrelated Workshop items");
+
+    // Without an ACF, numeric content folders are the fallback.
+    pz::error_code ec;
+    pz::fs::remove(acf, ec);
+    write_file(content / "666" / "mod.info", "id=GammaMod\nname=Gamma\n");
+    log.clear();
+    auto fallback = mm.import_steamcmd(logfn);
+    check(fallback.ok, "content-folder import succeeds without ACF: " +
+                           fallback.message);
+    check(pz::fs::exists(cfg.user_mods_dir / "GammaMod" / "mod.info"),
+          "numeric content folder imported when ACF is absent");
+
+    cfg.steamcmd_root.clear();
+    pz::ModManager no_root(cfg);
+    auto missing_setting = no_root.import_steamcmd(logfn);
+    check(!missing_setting.ok && missing_setting.message.find("download root") !=
+              std::string::npos,
+          "import requires the SteamCMD download root setting");
 }
 
 void test_atomic_write(const pz::fs::path& root) {
@@ -332,7 +473,8 @@ void test_version_locks(const pz::fs::path& root) {
     auto lock = mm.set_locked({777}, true, logfn);
     check(lock.ok && mm.locked(777) && mm.manually_locked(777),
           "manual lock applies and persists to the row");
-    check(read_file(cfg.data_dir / "installed.tsv").find("\t1\n") != std::string::npos,
+    check(read_file(cfg.data_dir / "installed.tsv").find("\t1\t0\n") !=
+              std::string::npos,
           "manual lock saved as the sixth installed.tsv column");
     {
         pz::ModManager restarted(cfg);
@@ -587,6 +729,22 @@ void test_time_updated_parser() {
               R"({"response":{"publishedfiledetails":[{"time_updated":"123"}]}})") == 0,
           "non-numeric time_updated rejected");
     check(pz::parse_published_file_time_updated("not json") == 0, "garbage rejected");
+
+    check(pz::parse_published_file_title(
+              R"({"response":{"publishedfiledetails":[{"result":1,"title":"My \"Mod\""}]}})") ==
+              "My \"Mod\"",
+          "Workshop title escapes parsed");
+    check(pz::parse_published_file_title(
+              R"({"response":{"publishedfiledetails":[{"title":"Caf\u00e9"}]}})") ==
+              "Caf\xc3\xa9",
+          "Workshop title unicode escapes decoded as UTF-8");
+    check(pz::parse_published_file_title(
+              R"({"response":{"publishedfiledetails":[{"title":"\ud83d\ude00"}]}})") ==
+              "\xf0\x9f\x98\x80",
+          "Workshop title surrogate pair decoded");
+    check(pz::parse_published_file_title(
+              R"({"response":{"publishedfiledetails":[{"result":1}]}})").empty(),
+          "missing Workshop title rejected");
 }
 
 void test_ui_helpers() {
@@ -599,21 +757,52 @@ void test_ui_helpers() {
     alpha.folder = "Alpha";
     alpha.name = "Alpha";
     const std::vector<pz::InstalledMod> mods{beta, alpha};
+    auto never_update = [](std::uint64_t) { return false; };
+    auto never_locked = [](std::uint64_t) { return false; };
 
-    auto visible = pz::visible_mods(mods, "alp", false, 0,
-        [](std::uint64_t) { return false; });
+    auto visible = pz::visible_mods(mods, "alp", pz::ModFilter::All, 0,
+                                    never_update, never_locked);
     check(visible.size() == 1 && visible[0].workshop_id == 2,
           "UI filter matches name and folder case-insensitively");
 
-    visible = pz::visible_mods(mods, "", false, 0,
-        [](std::uint64_t) { return false; });
+    visible = pz::visible_mods(mods, "", pz::ModFilter::All, 0,
+                               never_update, never_locked);
     check(visible.size() == 2 && visible[0].workshop_id == 2,
           "UI list sorts by name");
 
-    visible = pz::visible_mods(mods, "", true, 1,
-        [](std::uint64_t id) { return id == 1; });
+    auto only_beta_update = [](std::uint64_t id) { return id == 1; };
+    visible = pz::visible_mods(mods, "", pz::ModFilter::Updates, 1,
+                               only_beta_update, never_locked);
     check(visible.size() == 1 && visible[0].workshop_id == 1,
           "UI update filter uses the update callback");
+
+    pz::InstalledMod manual;
+    manual.folder = "Manual";
+    manual.name = "Manual";
+    auto only_alpha_locked = [](std::uint64_t id) { return id == 2; };
+    const auto rows = pz::mod_rows({beta, alpha, manual}, only_beta_update,
+                                   only_alpha_locked);
+    const auto counts = pz::mod_filter_counts(rows);
+    check(counts.total == 3 && counts.updates == 1 && counts.locked == 1 &&
+              counts.nontracked == 1,
+          "UI filter counts group rows and count untracked folders");
+    check(pz::mod_filter_available(pz::ModFilter::Updates, counts) &&
+              pz::mod_filter_available(pz::ModFilter::Locked, counts) &&
+              pz::mod_filter_available(pz::ModFilter::Nontracked, counts),
+          "UI filter options are available when they have matches");
+    const pz::ModFilterCounts empty_counts;
+    check(!pz::mod_filter_available(pz::ModFilter::Updates, empty_counts) &&
+              !pz::mod_filter_available(pz::ModFilter::Locked, empty_counts) &&
+              !pz::mod_filter_available(pz::ModFilter::Nontracked, empty_counts) &&
+              pz::mod_filter_available(pz::ModFilter::All, empty_counts),
+          "UI hides unpopulated filter options but keeps All");
+    visible = pz::filter_mod_rows(rows, "", pz::ModFilter::Locked, 0);
+    check(visible.size() == 1 && visible[0].workshop_id == 2 &&
+              visible[0].locked && !visible[0].update_available,
+          "UI locked filter uses only locked rows");
+    visible = pz::filter_mod_rows(rows, "", pz::ModFilter::Nontracked, 0);
+    check(visible.size() == 1 && visible[0].workshop_id == 0,
+          "UI nontracked filter keeps only manual folders");
 
     pz::MissingRequirement missing{"Owner", "Folder", "req"};
     const auto notice = pz::dependency_notice({missing});
@@ -639,8 +828,8 @@ void test_ui_helpers() {
     new_variant.folder = "NewVariant";
     new_variant.name = "Ladders new";
     new_variant.time_updated = 50;
-    visible = pz::visible_mods({old_variant, new_variant}, "", false, 0,
-        [](std::uint64_t) { return false; });
+    visible = pz::visible_mods({old_variant, new_variant}, "", pz::ModFilter::All,
+                               0, never_update, never_locked);
     check(visible.size() == 1 && visible[0].folders.size() == 2 &&
               visible[0].time_updated == 50,
           "UI groups folders from one Workshop item into a single row");
@@ -1244,7 +1433,8 @@ exit "${FAKE_CURL_EXIT:-0}"
     check(pz::fs::exists(cfg.user_mods_dir / "FixtureMod1010" / "mod.info") &&
               pz::fs::exists(cfg.user_mods_dir / "VariantB" / "mod.info"),
           "both variants from one Workshop item installed");
-    auto grouped = pz::visible_mods(mm.list(), "", false, 0,
+    auto grouped = pz::visible_mods(mm.list(), "", pz::ModFilter::All, 0,
+        [](std::uint64_t) { return false; },
         [](std::uint64_t) { return false; });
     check(grouped.size() == 1 && grouped[0].folders.size() == 2,
           "multi-folder item appears as one UI row");
@@ -1421,6 +1611,34 @@ exit "${FAKE_CURL_EXIT:-0}"
               "running the cached release clears the app update state");
     }
     unsetenv("FAKE_CURL_APP_JSON");
+
+    // No SteamCMD download root: an already-installed Workshop folder is
+    // adopted by its API title and stays exactly where it is.
+    pz::Config adopt_cfg;
+    adopt_cfg.zomboid_dir = root / "adopt-zomboid";
+    adopt_cfg.user_mods_dir = adopt_cfg.zomboid_dir / "mods";
+    adopt_cfg.data_dir = adopt_cfg.zomboid_dir / "pzmodmgr";
+    adopt_cfg.config_file = adopt_cfg.data_dir / "config.ini";
+    write_file(adopt_cfg.user_mods_dir / "LocalFixture" / "mod.info",
+               "id=LocalFixture\nname=Local Fixture\nmodversion=2.0\n");
+    write_file(adopt_cfg.user_mods_dir / "LocalFixture" / "keep.txt", "keep\n");
+    setenv("FAKE_CURL_JSON",
+           R"({"response":{"publishedfiledetails":[{"result":1,"title":"Local Fixture","time_updated":1700009999}]}})",
+           1);
+    pz::ModManager adopt(adopt_cfg);
+    std::vector<std::string> adopt_log;
+    auto adopt_logfn = [&adopt_log](const std::string& s) { adopt_log.push_back(s); };
+    auto adopt_result = adopt.import_steamcmd(adopt_logfn, {9901});
+    check(adopt_result.ok, "import adopts a local Workshop folder by API title: " +
+                               adopt_result.message);
+    const auto adopt_records = adopt.list();
+    check(adopt_records.size() == 1 && adopt_records[0].workshop_id == 9901 &&
+              adopt_records[0].folder == "LocalFixture" &&
+              adopt_records[0].imported && !adopt_records[0].owned &&
+              adopt_records[0].time_updated == 1700009999,
+          "adopted local folder is tracked read-only with the API timestamp");
+    check(pz::fs::exists(adopt_cfg.user_mods_dir / "LocalFixture" / "keep.txt"),
+          "title adoption never rewrites the existing folder");
 #else
     std::printf("SKIP: FAKE_STEAMCMD_PATH not defined; install flow not tested\n");
 #endif
@@ -1434,6 +1652,7 @@ int main() {
     test_steamcmd_detection(root);
     test_builtin_steamcmd(root);
     test_config_paths(root);
+    test_steamcmd_import(root);
     test_atomic_write(root);
     test_cache_cleanup(root);
     test_update_cache_cleanup(root);

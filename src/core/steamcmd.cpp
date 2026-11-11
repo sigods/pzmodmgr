@@ -555,6 +555,89 @@ bool read_uint_after(const std::string& json, std::size_t pos, std::uint64_t& va
     return true;
 }
 
+bool append_utf8(std::string& out, std::uint32_t cp) {
+    if (cp <= 0x7f) {
+        out += static_cast<char>(cp);
+    } else if (cp <= 0x7ff) {
+        out += static_cast<char>(0xc0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3f));
+    } else if (cp <= 0xffff) {
+        if (cp >= 0xd800 && cp <= 0xdfff) return false;
+        out += static_cast<char>(0xe0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
+        out += static_cast<char>(0x80 | (cp & 0x3f));
+    } else if (cp <= 0x10ffff) {
+        out += static_cast<char>(0xf0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3f));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
+        out += static_cast<char>(0x80 | (cp & 0x3f));
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool read_hex4(const std::string& json, std::size_t& i, std::uint32_t& value) {
+    if (i + 4 > json.size()) return false;
+    value = 0;
+    for (int n = 0; n < 4; ++n) {
+        const char c = json[i++];
+        value <<= 4;
+        if (c >= '0' && c <= '9') value |= static_cast<std::uint32_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') value |= static_cast<std::uint32_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') value |= static_cast<std::uint32_t>(c - 'A' + 10);
+        else return false;
+    }
+    return true;
+}
+
+// Reads the string value that follows the key found at pos. Handles JSON
+// escapes, including surrogate pairs, so Workshop titles match UTF-8 folder
+// and mod.info names.
+bool read_string_after(const std::string& json, std::size_t pos, std::string& value) {
+    std::size_t i = pos;
+    while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+    if (i >= json.size() || json[i] != ':') return false;
+    ++i;
+    while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+    if (i >= json.size() || json[i] != '"') return false;
+    ++i;
+
+    value.clear();
+    while (i < json.size()) {
+        const char c = json[i++];
+        if (c == '"') return true;
+        if (c != '\\') {
+            value += c;
+            continue;
+        }
+        if (i >= json.size()) return false;
+        const char esc = json[i++];
+        if (esc == '"' || esc == '\\' || esc == '/') value += esc;
+        else if (esc == 'b') value += '\b';
+        else if (esc == 'f') value += '\f';
+        else if (esc == 'n') value += '\n';
+        else if (esc == 'r') value += '\r';
+        else if (esc == 't') value += '\t';
+        else if (esc == 'u') {
+            std::uint32_t cp = 0;
+            if (!read_hex4(json, i, cp)) return false;
+            if (cp >= 0xd800 && cp <= 0xdbff && i + 6 <= json.size() &&
+                json[i] == '\\' && json[i + 1] == 'u') {
+                i += 2;
+                std::uint32_t low = 0;
+                if (!read_hex4(json, i, low) || low < 0xdc00 || low > 0xdfff)
+                    return false;
+                cp = 0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00);
+            }
+            if (!append_utf8(value, cp)) return false;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 std::uint64_t parse_published_file_time_updated(const std::string& json) {
@@ -566,6 +649,16 @@ std::uint64_t parse_published_file_time_updated(const std::string& json) {
         if (read_uint_after(json, pos, value)) return value;
         from = pos;   // A string value can itself equal "time_updated".
     }
+}
+
+std::string parse_published_file_title(const std::string& json) {
+    const std::size_t items = find_key(json, "publishedfiledetails");
+    if (items == std::string::npos) return {};
+    const std::size_t pos = find_key(json, "title", items);
+    if (pos == std::string::npos) return {};
+    std::string title;
+    if (!read_string_after(json, pos, title)) return {};
+    return title;
 }
 
 std::uint32_t parse_published_file_result(const std::string& json) {
@@ -611,6 +704,16 @@ std::uint64_t fetch_remote_time_updated(std::uint64_t item_id) {
     std::string response;
     if (!fetch_published_file_details(item_id, response)) return 0;
     return parse_published_file_time_updated(response);
+}
+
+RemoteFileDetails fetch_remote_file_details(std::uint64_t item_id) {
+    RemoteFileDetails details;
+    std::string response;
+    if (!fetch_published_file_details(item_id, response)) return details;
+    details.result = parse_published_file_result(response);
+    details.time_updated = parse_published_file_time_updated(response);
+    details.title = parse_published_file_title(response);
+    return details;
 }
 
 std::vector<std::uint64_t> parse_collection_children(const std::string& json) {

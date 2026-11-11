@@ -31,8 +31,22 @@ DownloadOutcome steamcmd_download_workshop_item(Config& cfg,
                                                 const fs::path& install_dir,
                                                 const LogFn& log);
 
+struct RemoteFileDetails {
+    std::uint32_t result = 0;       // 1 = OK, 0 = API unreachable
+    std::uint64_t time_updated = 0;
+    std::string title;
+};
+
+// Queries the public GetPublishedFileDetails endpoint. No API key or Steam
+// login is required. Returns result 0 when the API could not be reached.
+RemoteFileDetails fetch_remote_file_details(std::uint64_t item_id);
+
 // Queries the Steam Web API for the item's time_updated. Returns 0 on failure.
 std::uint64_t fetch_remote_time_updated(std::uint64_t item_id);
+
+// Parses the item title out of a GetPublishedFileDetails response.
+// Exposed for tests; returns empty when the field is missing or malformed.
+std::string parse_published_file_title(const std::string& json);
 
 // Parses time_updated out of a GetPublishedFileDetails JSON response.
 // Exposed for tests; returns 0 when the field is missing or invalid.

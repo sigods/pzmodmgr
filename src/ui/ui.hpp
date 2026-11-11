@@ -59,7 +59,28 @@ struct ModRow {
     std::string name;
     std::vector<std::string> folders;
     std::uint64_t time_updated = 0;
+    bool update_available = false;
     bool locked = false;
+    bool imported = false;
+};
+
+enum class ModFilter { All, Updates, Locked, Nontracked };
+
+inline const char* mod_filter_name(ModFilter filter) {
+    switch (filter) {
+    case ModFilter::Updates: return "Updates";
+    case ModFilter::Locked: return "Locked";
+    case ModFilter::Nontracked: return "Nontracked";
+    case ModFilter::All: break;
+    }
+    return "All";
+}
+
+struct ModFilterCounts {
+    int total = 0;
+    int updates = 0;
+    int locked = 0;
+    int nontracked = 0;
 };
 
 inline std::string join_workshop_ids(const std::vector<std::uint64_t>& ids) {
@@ -116,36 +137,82 @@ inline std::string enabled_in(const std::vector<ActivationTarget>& targets,
     return out;
 }
 
-template <typename HasUpdate>
-std::vector<ModRow> visible_mods(const std::vector<InstalledMod>& mods,
-                                 const std::string& filter, bool only_updates,
-                                 int sort_mode, HasUpdate has_update) {
-    const std::string needle = ascii_lowercase(filter);
-    std::vector<ModRow> visible;
-    visible.reserve(mods.size());
+inline ModFilterCounts mod_filter_counts(const std::vector<ModRow>& rows) {
+    ModFilterCounts counts;
+    counts.total = static_cast<int>(rows.size());
+    for (const auto& row : rows) {
+        if (row.update_available) ++counts.updates;
+        if (row.locked) ++counts.locked;
+        if (row.workshop_id == 0) ++counts.nontracked;
+    }
+    return counts;
+}
+
+inline bool mod_filter_available(ModFilter filter, const ModFilterCounts& counts) {
+    if (filter == ModFilter::Updates) return counts.updates > 0;
+    if (filter == ModFilter::Locked) return counts.locked > 0;
+    if (filter == ModFilter::Nontracked) return counts.nontracked > 0;
+    return true;
+}
+
+inline std::string mod_filter_label(ModFilter filter, const ModFilterCounts& counts) {
+    const int count = filter == ModFilter::Updates ? counts.updates
+        : filter == ModFilter::Locked ? counts.locked
+        : filter == ModFilter::Nontracked ? counts.nontracked : counts.total;
+    return std::string(mod_filter_name(filter)) + " (" + std::to_string(count) + ")";
+}
+
+// Groups tracked rows and manual folders before filtering. The UI calls this
+// once so the dropdown counts and the visible rows describe the same list.
+template <typename HasUpdate, typename IsLocked>
+std::vector<ModRow> mod_rows(const std::vector<InstalledMod>& mods,
+                             HasUpdate has_update, IsLocked is_locked) {
+    std::vector<ModRow> rows;
+    rows.reserve(mods.size());
     for (const auto& m : mods) {
-        if (only_updates && !has_update(m.workshop_id)) continue;
-        if (!needle.empty()) {
-            const std::string haystack = m.name + " " + m.folder;
-            if (ascii_lowercase(haystack).find(needle) == std::string::npos) continue;
-        }
-        auto existing = m.workshop_id == 0 ? visible.end()
-            : std::find_if(visible.begin(), visible.end(), [&](const ModRow& row) {
+        auto existing = m.workshop_id == 0 ? rows.end()
+            : std::find_if(rows.begin(), rows.end(), [&](const ModRow& row) {
                   return row.workshop_id == m.workshop_id;
               });
-        if (existing != visible.end()) {
+        if (existing != rows.end()) {
             existing->folders.push_back(m.folder);
             existing->time_updated = std::max(existing->time_updated, m.time_updated);
             existing->locked = existing->locked || m.locked;
+            existing->imported = existing->imported || m.imported;
             continue;
         }
+        const bool update = m.workshop_id != 0 && has_update(m.workshop_id);
+        const bool locked = m.locked ||
+            (m.workshop_id != 0 && is_locked(m.workshop_id));
         ModRow row;
         row.workshop_id = m.workshop_id;
         row.name = m.name;
         row.folders.push_back(m.folder);
         row.time_updated = m.time_updated;
-        row.locked = m.locked;
-        visible.push_back(std::move(row));
+        row.update_available = update;
+        row.locked = locked;
+        row.imported = m.imported;
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+inline std::vector<ModRow> filter_mod_rows(const std::vector<ModRow>& rows,
+                                           const std::string& filter,
+                                           ModFilter mode, int sort_mode) {
+    const std::string needle = ascii_lowercase(filter);
+    std::vector<ModRow> visible;
+    visible.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (mode == ModFilter::Updates && !row.update_available) continue;
+        if (mode == ModFilter::Locked && !row.locked) continue;
+        if (mode == ModFilter::Nontracked && row.workshop_id != 0) continue;
+        if (!needle.empty()) {
+            std::string haystack = row.name;
+            for (const auto& folder : row.folders) haystack += " " + folder;
+            if (ascii_lowercase(haystack).find(needle) == std::string::npos) continue;
+        }
+        visible.push_back(row);
     }
     if (sort_mode == 0) {
         std::stable_sort(visible.begin(), visible.end(),
@@ -163,6 +230,15 @@ std::vector<ModRow> visible_mods(const std::vector<InstalledMod>& mods,
     return visible;
 }
 
+template <typename HasUpdate, typename IsLocked>
+std::vector<ModRow> visible_mods(const std::vector<InstalledMod>& mods,
+                                 const std::string& filter, ModFilter mode,
+                                 int sort_mode, HasUpdate has_update,
+                                 IsLocked is_locked) {
+    return filter_mod_rows(mod_rows(mods, has_update, is_locked), filter, mode,
+                           sort_mode);
+}
+
 inline std::string mod_meta(const ModRow& mod, const ModInfo* info,
                             const std::string& game_version,
                             const std::string& enabled_in_targets = {}) {
@@ -173,6 +249,7 @@ inline std::string mod_meta(const ModRow& mod, const ModInfo* info,
         meta += value;
     };
     if (mod.folders.size() == 1) add(mod.folders.front());
+    if (mod.imported) add("Imported");
     if (mod.locked) add("Locked");
     if (!enabled_in_targets.empty()) add("On: " + enabled_in_targets);
     const std::string updated = format_update_date(mod.time_updated);

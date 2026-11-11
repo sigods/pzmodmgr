@@ -27,9 +27,11 @@ namespace pz {
 namespace {
 constexpr int kW = 920, kH = 720;
 constexpr int kMargin = 24;
-constexpr int kInputX = 24, kInputY = 84, kInputW = 644, kInputH = 38;
-constexpr int kInstallX = 684, kInstallW = 212;
+constexpr int kInputX = 24, kInputY = 84, kInputW = 524, kInputH = 38;
+constexpr int kInstallX = 560, kInstallW = 212;
+constexpr int kImportX = 784, kImportW = 112;
 constexpr int kFilterY = 158, kFilterH = 24, kFilterW = 180;
+constexpr int kFilterMenuX = 312, kFilterMenuW = 170, kFilterMenuRowH = 26;
 constexpr int kListTop = 192, kRowH = 64, kRowGap = 6, kRows = 5;
 constexpr int kCardW = 872;
 
@@ -55,14 +57,15 @@ constexpr int kActivityTrackBottom = kActivityY + kActivityH - 8;
 constexpr int kActivityScrollX = kMargin + kCardW - kScrollW - 12;
 constexpr int kStatusY = 702;
 constexpr int kSettingsX = 130, kSettingsY = 140;
-constexpr int kSettingsW = 660, kSettingsH = 430;
+constexpr int kSettingsW = 660, kSettingsH = 500;
 constexpr int kSettingsFieldX = kSettingsX + 32;
 constexpr int kSettingsFieldW = kSettingsW - 64;
 constexpr int kSettingsFieldH = 38;
 constexpr int kSettingsZomboidY = kSettingsY + 104;
 constexpr int kSettingsSteamcmdY = kSettingsY + 178;
-constexpr int kSettingsUserY = kSettingsY + 252;
-constexpr int kSettingsButtonsY = kSettingsY + 392;
+constexpr int kSettingsRootY = kSettingsY + 252;
+constexpr int kSettingsUserY = kSettingsY + 326;
+constexpr int kSettingsButtonsY = kSettingsY + 458;
 constexpr int kTargetsRowY = kSettingsY + 104;
 constexpr int kTargetsRowH = 36;
 constexpr int kTargetsRows = 7;
@@ -80,8 +83,8 @@ struct Palette {
 };
 
 enum class Btn {
-    Nothing, Install, Settings, Update, Remove, UpdateAll, SelectAll, Clear, Copy,
-    Lock, Save, Cancel, Theme, FilterAll, FilterUpdates, Sort, Check, Enable,
+    Nothing, Install, Import, Settings, Update, Remove, UpdateAll, SelectAll, Clear, Copy,
+    Lock, Save, Cancel, Theme, FilterMenu, Sort, Check, Enable,
     ShareServer, SelfUpdate, EnableTarget, DisableTarget, ShareTargets, CopyNames,
     CloseTargets
 };
@@ -213,8 +216,7 @@ void draw_button_icon(Display* d, Window w, GC gc, Btn b, int x, int cy,
     case Btn::Clear:
     case Btn::Cancel: glyph = &glyphs::kClear; break;
     case Btn::Lock: glyph = &glyphs::kLock; break;
-    case Btn::FilterAll:
-    case Btn::FilterUpdates: glyph = &glyphs::kFilter; break;
+    case Btn::FilterMenu: glyph = &glyphs::kFilter; break;
     case Btn::Sort: glyph = &glyphs::kSort; break;
     default: return;   // Check intentionally has no glyph.
     }
@@ -427,7 +429,9 @@ int run_ui(ModManager& mm) {
     bool busy = false;
     bool app_update_available = mm.app_update_available();
 
-    enum class PasteField { Input, Filter, SettingsZomboid, SettingsPath, SettingsUser };
+    enum class PasteField {
+        Input, Filter, SettingsZomboid, SettingsPath, SettingsRoot, SettingsUser
+    };
     PasteField paste_field = PasteField::Input;
     Atom paste_selection = None;
     Time paste_time = CurrentTime;
@@ -438,7 +442,10 @@ int run_ui(ModManager& mm) {
     pz::flat_set<std::string> selected_folders;
     bool confirm_remove = false;
     std::string filter_text;
-    bool only_updates = false;
+    ModFilter filter_mode = ModFilter::All;
+    ModFilterCounts filter_counts;
+    bool filter_menu_open = false;
+    int filter_menu_hover = -1;
     bool filter_focus = false;
     int sort_mode = 0;   // 0 = name, 1 = updated
     int list_offset = 0;
@@ -481,11 +488,43 @@ int run_ui(ModManager& mm) {
         selected_folders.clear();
     };
 
+    auto filter_options = [&]() {
+        std::vector<ModFilter> options{ModFilter::All};
+        if (filter_counts.updates > 0) options.push_back(ModFilter::Updates);
+        if (filter_counts.locked > 0) options.push_back(ModFilter::Locked);
+        if (filter_counts.nontracked > 0) options.push_back(ModFilter::Nontracked);
+        return options;
+    };
+
+    auto filter_menu_rect = [&]() -> Rect {
+        const int rows = static_cast<int>(filter_options().size());
+        return {kFilterMenuX, kFilterY + kFilterH + 2, kFilterMenuW,
+                rows * kFilterMenuRowH + 2};
+    };
+
+    auto filter_choice_at = [&](int x, int y) -> int {
+        const Rect menu = filter_menu_rect();
+        if (!in_rect(x, y, menu.x, menu.y, menu.w, menu.h)) return -1;
+        const int inside = y - menu.y - 1;
+        if (inside < 0) return -1;
+        const int row = inside / kFilterMenuRowH;
+        return row >= 0 && row < static_cast<int>(filter_options().size()) ? row : -1;
+    };
+
+    auto choose_filter = [&](ModFilter mode) {
+        filter_mode = mode;
+        filter_menu_open = false;
+        filter_menu_hover = -1;
+        filter_focus = false;
+        list_offset = 0;
+        list_dirty = true;
+    };
+
     bool settings_open = false;
     bool settings_dark = false;
     bool settings_auto = false;
     int settings_field = 0;
-    std::string settings_zomboid, settings_path, settings_user;
+    std::string settings_zomboid, settings_path, settings_root, settings_user;
 
     bool targets_open = false;
     int target_focus = -1;
@@ -579,6 +618,7 @@ int run_ui(ModManager& mm) {
         }
         switch (b) {
         case Btn::Install: return {kInstallX, kInputY, kInstallW, kInputH};
+        case Btn::Import: return {kImportX, kInputY, kImportW, kInputH};
         case Btn::Enable: return {688, 24, 100, 30};
         case Btn::ShareServer: return {560, 24, 116, 30};
         case Btn::Settings: return {800, 24, 96, 30};
@@ -589,10 +629,9 @@ int run_ui(ModManager& mm) {
         case Btn::Update: return {506, kActionY, 120, kActionH};
         case Btn::UpdateAll: return {636, kActionY, 120, kActionH};
         case Btn::Remove: return {766, kActionY, 130, kActionH};
-        case Btn::FilterAll: return {312, kFilterY, 60, kFilterH};
-        case Btn::FilterUpdates: return {378, kFilterY, 112, kFilterH};
-        case Btn::Check: return {496, kFilterY, 120, kFilterH};
-        case Btn::Sort: return {626, kFilterY, 140, kFilterH};
+        case Btn::FilterMenu: return {kFilterMenuX, kFilterY, kFilterMenuW, kFilterH};
+        case Btn::Check: return {492, kFilterY, 120, kFilterH};
+        case Btn::Sort: return {622, kFilterY, 140, kFilterH};
         case Btn::SelfUpdate: return {440, 24, 108, 30};
         default: return {};
         }
@@ -615,6 +654,7 @@ int run_ui(ModManager& mm) {
         if (busy) return false;
         switch (b) {
         case Btn::Install:
+        case Btn::Import:
         case Btn::Settings:
         case Btn::ShareServer:
         case Btn::UpdateAll: return true;
@@ -626,8 +666,7 @@ int run_ui(ModManager& mm) {
         case Btn::Enable:
         case Btn::Clear: return selected_any();
         case Btn::SelectAll: return !visible.empty();
-        case Btn::FilterAll:
-        case Btn::FilterUpdates:
+        case Btn::FilterMenu:
         case Btn::Sort:
         case Btn::Check: return true;
         default: return false;
@@ -637,6 +676,7 @@ int run_ui(ModManager& mm) {
     auto button_label = [&](Btn b) -> std::string {
         switch (b) {
         case Btn::Install: return "Install";
+        case Btn::Import: return "Import";
         case Btn::Settings: return "Settings";
         case Btn::Update: return "Update";
         case Btn::Remove: return confirm_remove ? "Confirm remove" : "Remove";
@@ -665,8 +705,7 @@ int run_ui(ModManager& mm) {
         case Btn::CloseTargets: return "Close";
         case Btn::Save: return "Save";
         case Btn::Cancel: return "Cancel";
-        case Btn::FilterAll: return "All";
-        case Btn::FilterUpdates: return "Updates";
+        case Btn::FilterMenu: return mod_filter_name(filter_mode);
         case Btn::Sort: return sort_mode == 0 ? "Sort: Name" : "Sort: Updated";
         case Btn::Theme: return settings_dark ? "Theme: Dark" : "Theme: Light";
         case Btn::Check: return "Check updates";
@@ -692,10 +731,10 @@ int run_ui(ModManager& mm) {
             }
             return Btn::Nothing;
         }
-        for (Btn b : {Btn::Install, Btn::ShareServer, Btn::SelfUpdate, Btn::Enable,
-                      Btn::Settings, Btn::Update, Btn::Remove, Btn::UpdateAll,
-                      Btn::SelectAll, Btn::Clear, Btn::Lock, Btn::Copy, Btn::FilterAll,
-                      Btn::FilterUpdates, Btn::Sort, Btn::Check}) {
+        for (Btn b : {Btn::Install, Btn::Import, Btn::ShareServer, Btn::SelfUpdate,
+                      Btn::Enable, Btn::Settings, Btn::Update, Btn::Remove, Btn::UpdateAll,
+                      Btn::SelectAll, Btn::Clear, Btn::Lock, Btn::Copy, Btn::FilterMenu,
+                      Btn::Sort, Btn::Check}) {
             if (!button_enabled(b)) continue;
             Rect r = button_rect(b);
             if (in_rect(x, y, r.x, r.y, r.w, r.h)) return b;
@@ -710,9 +749,9 @@ int run_ui(ModManager& mm) {
         const bool primary = b == Btn::Install || b == Btn::Save ||
                              b == Btn::EnableTarget;
         const bool danger = b == Btn::Remove && confirm_remove;
-        const bool chip = b == Btn::FilterAll || b == Btn::FilterUpdates;
-        const bool active = (b == Btn::FilterAll && !only_updates) ||
-                            (b == Btn::FilterUpdates && only_updates);
+        const bool filter_button = b == Btn::FilterMenu;
+        const bool active = filter_button &&
+                            (filter_mode != ModFilter::All || filter_menu_open);
         const bool hot = enabled && hover_button == static_cast<int>(b);
         unsigned long fill_color = pal.surface;
         unsigned long border_color = pal.border;
@@ -727,7 +766,7 @@ int run_ui(ModManager& mm) {
             border_color = pal.danger;
             text_color = pal.danger;
             icon_color = pal.danger;
-        } else if (chip && active) {
+        } else if (active) {
             fill_color = pal.brand_soft;
             border_color = pal.brand;
             text_color = pal.brand;
@@ -749,8 +788,8 @@ int run_ui(ModManager& mm) {
         fill(dpy, win, gc, r.x, r.y, r.w, r.h, fill_color);
         frame(dpy, win, gc, r.x, r.y, r.w, r.h, border_color);
         const std::string label = button_label(b);
-        const bool show_icon = b != Btn::Settings && b != Btn::Check &&
-                               b != Btn::Theme && b != Btn::Enable &&
+        const bool show_icon = b != Btn::Import && b != Btn::Settings &&
+                               b != Btn::Check && b != Btn::Theme && b != Btn::Enable &&
                                b != Btn::ShareServer && b != Btn::SelfUpdate &&
                                b != Btn::EnableTarget && b != Btn::DisableTarget &&
                                b != Btn::CloseTargets &&
@@ -763,6 +802,14 @@ int run_ui(ModManager& mm) {
             draw_button_icon(dpy, win, gc, b, start, r.y + r.h / 2, icon_color);
         text(dpy, win, gc, body, start + icon_w + gap, baseline_for(body, r), label,
              text_color);
+        if (filter_button) {
+            const int ax = r.x + r.w - 17;
+            const int ay = r.y + (filter_menu_open ? 12 : 10);
+            const int dy = filter_menu_open ? -4 : 4;
+            XSetForeground(dpy, gc, text_color);
+            XDrawLine(dpy, win, gc, ax, ay, ax + 4, ay + dy);
+            XDrawLine(dpy, win, gc, ax + 4, ay + dy, ax + 8, ay);
+        }
         XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
     };
 
@@ -823,9 +870,14 @@ int run_ui(ModManager& mm) {
     };
 
     auto rebuild_visible = [&]() {
-        visible = visible_mods(mm.list_all(), filter_text, only_updates, sort_mode,
-            [&](std::uint64_t id) { return mm.update_available(id); });
-        for (auto& row : visible) row.locked = mm.locked(row.workshop_id);
+        const auto all_mods = mm.list_all();
+        const auto rows = mod_rows(all_mods,
+            [&](std::uint64_t id) { return mm.update_available(id); },
+            [&](std::uint64_t id) { return mm.locked(id); });
+        filter_counts = mod_filter_counts(rows);
+        if (!mod_filter_available(filter_mode, filter_counts))
+            filter_mode = ModFilter::All;
+        visible = filter_mod_rows(rows, filter_text, filter_mode, sort_mode);
         activation = mm.activation_targets();
         row_mod_ids.clear();
         row_enabled.clear();
@@ -968,12 +1020,19 @@ int run_ui(ModManager& mm) {
         draw_input({x, kSettingsSteamcmdY, kSettingsFieldW, kSettingsFieldH},
                    settings_path, "Built-in steamcmd", settings_field == 1, true, 0);
 
-        text(dpy, win, gc, body, x, kSettingsY + 240, "Steam username", pal.text);
+        text(dpy, win, gc, body, x, kSettingsY + 240, "SteamCMD download root", pal.text);
+        text(dpy, win, gc, body, x + 220, kSettingsY + 240,
+             "Folder containing steamapps/workshop", pal.muted);
+        draw_input({x, kSettingsRootY, kSettingsFieldW, kSettingsFieldH},
+                   settings_root, "Leave blank unless importing existing downloads",
+                   settings_field == 2, true, 0);
+
+        text(dpy, win, gc, body, x, kSettingsY + 314, "Steam username", pal.text);
         draw_input({x, kSettingsUserY, kSettingsFieldW, kSettingsFieldH},
-                   settings_user, "anonymous", settings_field == 2, true, 0);
-        const bool auto_hot = in_rect(last_mouse_x, last_mouse_y, x, kSettingsY + 292,
+                   settings_user, "anonymous", settings_field == 3, true, 0);
+        const bool auto_hot = in_rect(last_mouse_x, last_mouse_y, x, kSettingsY + 366,
                                       kSettingsFieldW, 22);
-        const Rect auto_box{x, kSettingsY + 292, 18, 18};
+        const Rect auto_box{x, kSettingsY + 366, 18, 18};
         fill(dpy, win, gc, auto_box.x, auto_box.y, auto_box.w, auto_box.h,
              settings_auto ? pal.accent : pal.field);
         frame(dpy, win, gc, auto_box.x, auto_box.y, auto_box.w, auto_box.h,
@@ -987,12 +1046,12 @@ int run_ui(ModManager& mm) {
                       auto_box.x + 14, auto_box.y + 4);
             XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
         }
-        text(dpy, win, gc, body, x + 28, kSettingsY + 306,
+        text(dpy, win, gc, body, x + 28, kSettingsY + 380,
              "Enable newly installed mods in mods/default.txt", pal.text);
-        text(dpy, win, gc, body, x, kSettingsY + 330,
+        text(dpy, win, gc, body, x, kSettingsY + 408,
              "No password is stored. Run steamcmd manually once so its login is cached.",
              pal.muted);
-        text(dpy, win, gc, body, x, kSettingsY + 348,
+        text(dpy, win, gc, body, x, kSettingsY + 426,
              "Use anonymous for public Workshop items.", pal.muted);
         draw_button(Btn::Save);
         draw_button(Btn::Cancel);
@@ -1111,9 +1170,11 @@ int run_ui(ModManager& mm) {
 
         draw_input({kInputX, kInputY, kInputW, kInputH}, input,
                    "Paste Workshop URLs or IDs", !filter_focus && !busy, !busy, 0);
+        draw_button(Btn::Import);
         draw_button(Btn::Install);
         text(dpy, win, gc, body, kMargin, 142,
-             "Press Enter to install. Separate several links with spaces; collections are supported.", pal.muted);
+             "Press Enter to install, or Import a URL/ID to track an existing local copy.",
+             pal.muted);
 
         if (list_dirty && !busy) rebuild_visible();
 
@@ -1127,8 +1188,7 @@ int run_ui(ModManager& mm) {
             text(dpy, win, gc, body, clear.x + (clear.w - text_width(body, "X")) / 2,
                  baseline_for(body, clear), "X", hot ? pal.accent : pal.muted);
         }
-        draw_button(Btn::FilterAll);
-        draw_button(Btn::FilterUpdates);
+        draw_button(Btn::FilterMenu);
         draw_button(Btn::Sort);
         draw_button(Btn::Check);
         const std::size_t selected_count = selected_ids.size() + selected_folders.size();
@@ -1162,7 +1222,7 @@ int run_ui(ModManager& mm) {
         } else if (visible.empty()) {
             fill(dpy, win, gc, kMargin, kListTop, kCardW, 64, pal.surface);
             frame(dpy, win, gc, kMargin, kListTop, kCardW, 64, pal.border);
-            const bool filtered = !filter_text.empty() || only_updates;
+            const bool filtered = !filter_text.empty() || filter_mode != ModFilter::All;
             text(dpy, win, gc, body, kMargin + 20, kListTop + 38,
                  filtered ? "No mods match the current filters."
                           : "No mods installed yet. Paste a Workshop link above to begin.",
@@ -1202,7 +1262,7 @@ int run_ui(ModManager& mm) {
                          initial, pal.accent);
                 }
 
-                const bool has_update = mm.update_available(m.workshop_id);
+                const bool has_update = m.update_available;
                 const bool is_locked = m.locked;
                 const bool show_badge = has_update || is_locked;
                 const bool switchable = !activation.empty();
@@ -1304,6 +1364,26 @@ int run_ui(ModManager& mm) {
                                       (visible.size() == 1 ? " mod" : " mods");
         text(dpy, win, gc, body, kMargin + kCardW - text_width(body, mod_count), kStatusY,
              mod_count, pal.muted);
+
+        if (filter_menu_open) {
+            const Rect menu = filter_menu_rect();
+            fill(dpy, win, gc, menu.x, menu.y, menu.w, menu.h, pal.surface);
+            frame(dpy, win, gc, menu.x, menu.y, menu.w, menu.h, pal.border_strong);
+            const auto options = filter_options();
+            int row_y = menu.y + 1;
+            for (std::size_t i = 0; i < options.size(); ++i) {
+                const bool current = options[i] == filter_mode;
+                const bool hot = filter_menu_hover == static_cast<int>(i);
+                const Rect row{menu.x + 1, row_y, menu.w - 2, kFilterMenuRowH};
+                if (current || hot)
+                    fill(dpy, win, gc, row.x, row.y, row.w, row.h,
+                         current ? pal.brand_soft : pal.hover);
+                text(dpy, win, gc, body, row.x + 10, row.y + 17,
+                     mod_filter_label(options[i], filter_counts),
+                     current ? pal.brand : pal.text);
+                row_y += kFilterMenuRowH;
+            }
+        }
         }
 
         XCopyArea(dpy, win, wnd, gc, 0, 0, kW, kH, 0, 0);
@@ -1371,6 +1451,7 @@ int run_ui(ModManager& mm) {
     auto start_command = [&](const std::string& line) {
         if (busy || line.empty()) return;
         confirm_remove = false;
+        filter_menu_open = false;
         push("> " + line);
         busy = true;
         if (worker.joinable()) worker.join();
@@ -1470,6 +1551,7 @@ int run_ui(ModManager& mm) {
             clamp_target_offset();
         }
         targets_open = true;
+        filter_menu_open = false;
         redraw();
     };
 
@@ -1556,11 +1638,13 @@ int run_ui(ModManager& mm) {
         if (busy) return;
         settings_zomboid = mm.config().zomboid_dir.string();
         settings_path = mm.config().steamcmd_exe.string();
+        settings_root = mm.config().steamcmd_root.string();
         settings_user = mm.config().steam_user;
         settings_dark = mm.config().dark_mode;
         settings_auto = mm.config().auto_enable;
         settings_field = 0;
         settings_open = true;
+        filter_menu_open = false;
         filter_focus = false;
         hover_button = -1;
         redraw();
@@ -1573,13 +1657,14 @@ int run_ui(ModManager& mm) {
             return;
         }
         auto r1 = run_command(mm, "config steamcmd_exe " + settings_path, push);
-        auto r2 = run_command(mm, "config steam_user " + settings_user, push);
-        auto r3 = run_command(mm, "config zomboid_dir " + settings_zomboid, push);
-        auto r4 = run_command(mm, std::string("config dark_mode ") +
+        auto r2 = run_command(mm, "config steamcmd_root " + settings_root, push);
+        auto r3 = run_command(mm, "config steam_user " + settings_user, push);
+        auto r4 = run_command(mm, "config zomboid_dir " + settings_zomboid, push);
+        auto r5 = run_command(mm, std::string("config dark_mode ") +
                                    (settings_dark ? "on" : "off"), push);
-        auto r5 = run_command(mm, std::string("config auto_enable ") +
+        auto r6 = run_command(mm, std::string("config auto_enable ") +
                                    (settings_auto ? "on" : "off"), push);
-        if (r1.ok && r2.ok && r3.ok && r4.ok && r5.ok) {
+        if (r1.ok && r2.ok && r3.ok && r4.ok && r5.ok && r6.ok) {
             dark_mode = settings_dark;
             pal = dark_mode ? dark_pal : light_pal;
             XSetWindowBackground(dpy, wnd, pal.bg);
@@ -1593,7 +1678,8 @@ int run_ui(ModManager& mm) {
             push("Settings saved");
         } else {
             const auto& failed = !r1.ok ? r1
-                : (!r2.ok ? r2 : (!r3.ok ? r3 : (!r4.ok ? r4 : r5)));
+                : (!r2.ok ? r2 : (!r3.ok ? r3 : (!r4.ok ? r4
+                : (!r5.ok ? r5 : r6))));
             push("ERROR: " + failed.message);
         }
         redraw();
@@ -1620,6 +1706,7 @@ int run_ui(ModManager& mm) {
         if (settings_open) {
             if (paste_field == PasteField::SettingsZomboid) settings_zomboid += value;
             else if (paste_field == PasteField::SettingsPath) settings_path += value;
+            else if (paste_field == PasteField::SettingsRoot) settings_root += value;
             else settings_user += value;
         } else {
             filter_text += value;
@@ -1634,6 +1721,7 @@ int run_ui(ModManager& mm) {
         paste_field = settings_open
             ? (settings_field == 0 ? PasteField::SettingsZomboid
                : settings_field == 1 ? PasteField::SettingsPath
+               : settings_field == 2 ? PasteField::SettingsRoot
                                      : PasteField::SettingsUser)
             : (filter_focus ? PasteField::Filter : PasteField::Input);
         paste_selection = selection;
@@ -1700,17 +1788,23 @@ int run_ui(ModManager& mm) {
                 }
                 const Btn next_button = button_at(ev.xmotion.x, ev.xmotion.y);
                 const int next_row = row_at(ev.xmotion.x, ev.xmotion.y);
-                if (static_cast<int>(next_button) != hover_button || next_row != hover_row) {
+                const int next_filter_hover = filter_menu_open
+                    ? filter_choice_at(ev.xmotion.x, ev.xmotion.y) : -1;
+                if (static_cast<int>(next_button) != hover_button ||
+                    next_row != hover_row ||
+                    next_filter_hover != filter_menu_hover) {
                     hover_button = static_cast<int>(next_button);
                     hover_row = next_row;
+                    filter_menu_hover = next_filter_hover;
                     redraw();
                 }
                 break;
             }
             case LeaveNotify:
-                if (hover_button != -1 || hover_row != -1) {
+                if (hover_button != -1 || hover_row != -1 || filter_menu_hover != -1) {
                     hover_button = -1;
                     hover_row = -1;
+                    filter_menu_hover = -1;
                     redraw();
                 }
                 break;
@@ -1724,6 +1818,26 @@ int run_ui(ModManager& mm) {
             case ButtonPress: {
                 if (busy) break;
                 const int x = ev.xbutton.x, y = ev.xbutton.y;
+                if (filter_menu_open) {
+                    if (ev.xbutton.button == Button1) {
+                        if (in_rect(x, y, kFilterMenuX, kFilterY, kFilterMenuW, kFilterH)) {
+                            filter_menu_open = false;
+                            filter_menu_hover = -1;
+                            redraw();
+                            break;
+                        }
+                        const int choice = filter_choice_at(x, y);
+                        if (choice >= 0) {
+                            choose_filter(filter_options()[static_cast<std::size_t>(choice)]);
+                            redraw();
+                            break;
+                        }
+                    }
+                    filter_menu_open = false;
+                    filter_menu_hover = -1;
+                    redraw();
+                    break;
+                }
                 if (targets_open) {
                     if (ev.xbutton.button == Button4 || ev.xbutton.button == Button5) {
                         target_offset += ev.xbutton.button == Button4 ? -1 : 1;
@@ -1794,7 +1908,7 @@ int run_ui(ModManager& mm) {
                         redraw();
                         break;
                     }
-                    if (in_rect(x, y, kSettingsFieldX, kSettingsY + 292,
+                    if (in_rect(x, y, kSettingsFieldX, kSettingsY + 366,
                                 kSettingsFieldW, 22)) {
                         settings_auto = !settings_auto;
                         redraw();
@@ -1807,9 +1921,12 @@ int run_ui(ModManager& mm) {
                     else if (in_rect(x, y, kSettingsFieldX, kSettingsSteamcmdY,
                                      kSettingsFieldW, kSettingsFieldH))
                         field = 1;
-                    else if (in_rect(x, y, kSettingsFieldX, kSettingsUserY,
+                    else if (in_rect(x, y, kSettingsFieldX, kSettingsRootY,
                                      kSettingsFieldW, kSettingsFieldH))
                         field = 2;
+                    else if (in_rect(x, y, kSettingsFieldX, kSettingsUserY,
+                                     kSettingsFieldW, kSettingsFieldH))
+                        field = 3;
                     if (field >= 0) settings_field = field;
                     if (ev.xbutton.button == Button2 && field >= 0) {
                         request_paste(XA_PRIMARY, false, ev.xbutton.time);
@@ -1920,18 +2037,9 @@ int run_ui(ModManager& mm) {
                 }
 
                 const Btn b = button_at(x, y);
-                if (b == Btn::FilterAll) {
-                    only_updates = false;
-                    list_offset = 0;
-                    list_dirty = true;
-                    filter_focus = false;
-                    redraw();
-                    break;
-                }
-                if (b == Btn::FilterUpdates) {
-                    only_updates = true;
-                    list_offset = 0;
-                    list_dirty = true;
+                if (b == Btn::FilterMenu) {
+                    filter_menu_open = true;
+                    filter_menu_hover = -1;
                     filter_focus = false;
                     redraw();
                     break;
@@ -1954,6 +2062,15 @@ int run_ui(ModManager& mm) {
                 }
                 if (b == Btn::Install) {
                     submit();
+                    break;
+                }
+                if (b == Btn::Import) {
+                    std::string line = "import";
+                    if (!input.empty()) {
+                        line += " " + input;
+                        input.clear();
+                    }
+                    start_command(line);
                     break;
                 }
                 if (b == Btn::Settings) {
@@ -2133,6 +2250,29 @@ int run_ui(ModManager& mm) {
                     break;
                 }
 
+                if (filter_menu_open) {
+                    const auto options = filter_options();
+                    if (ks == XK_Escape) {
+                        filter_menu_open = false;
+                        filter_menu_hover = -1;
+                        redraw();
+                    } else if (ks == XK_Down || ks == XK_Up) {
+                        const int step = ks == XK_Down ? 1 : -1;
+                        const int last = static_cast<int>(options.size()) - 1;
+                        const int next = filter_menu_hover < 0
+                            ? (step > 0 ? 0 : last)
+                            : std::max(0, std::min(last, filter_menu_hover + step));
+                        filter_menu_hover = next;
+                        redraw();
+                    } else if ((ks == XK_Return || ks == XK_KP_Enter) &&
+                               filter_menu_hover >= 0 &&
+                               filter_menu_hover < static_cast<int>(options.size())) {
+                        choose_filter(options[static_cast<std::size_t>(filter_menu_hover)]);
+                        redraw();
+                    }
+                    break;
+                }
+
                 if (targets_open) {
                     if (ks == XK_Escape) {
                         targets_open = false;
@@ -2154,16 +2294,18 @@ int run_ui(ModManager& mm) {
                         settings_open = false;
                         redraw();
                     } else if (ks == XK_Tab) {
-                        settings_field = (settings_field + 1) % 3;
+                        settings_field = (settings_field + 1) % 4;
                         redraw();
                     } else if (ks == XK_BackSpace) {
                         std::string& field = settings_field == 0 ? settings_zomboid
-                            : settings_field == 1 ? settings_path : settings_user;
+                            : settings_field == 1 ? settings_path
+                            : settings_field == 2 ? settings_root : settings_user;
                         if (!field.empty()) field.pop_back();
                         redraw();
                     } else if (n > 0 && static_cast<unsigned char>(buf[0]) >= 32) {
                         std::string& field = settings_field == 0 ? settings_zomboid
-                            : settings_field == 1 ? settings_path : settings_user;
+                            : settings_field == 1 ? settings_path
+                            : settings_field == 2 ? settings_root : settings_user;
                         field.append(buf, static_cast<std::size_t>(n));
                         redraw();
                     }
@@ -2195,8 +2337,8 @@ int run_ui(ModManager& mm) {
                         filter_text.clear();
                         list_offset = 0;
                         list_dirty = true;
-                    } else if (only_updates) {
-                        only_updates = false;
+                    } else if (filter_mode != ModFilter::All) {
+                        filter_mode = ModFilter::All;
                         list_offset = 0;
                         list_dirty = true;
                     } else if (selected_any()) {

@@ -1,7 +1,7 @@
 #pragma once
 #include "core/mod_manager.hpp"
 namespace pz {
-// Commands: add <url|id> | remove <id> | update [id] | check | list |
+// Commands: add <url|id> | import [url|id]... | remove <id> | update [id] | check | list |
 // lock|unlock <id|name>... | targets | target-lock <index> on|off |
 // enable|disable <target index> <id>... | share <target index> | self-update |
 // config <key> <value>. A bare Workshop URL or numeric id is treated as `add`.

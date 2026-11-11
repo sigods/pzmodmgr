@@ -8,6 +8,8 @@ cmake -B build && cmake --build build
 ./build/pzmodmgr config steam_user <steam_login_name>
 ./build/pzmodmgr config zomboid_dir /path/to/Zomboid   # optional
 ./build/pzmodmgr add <workshop item or collection url/id>...
+./build/pzmodmgr config steamcmd_root /path/to/steamcmd   # for import
+./build/pzmodmgr import
 
 The first add downloads the built-in steamcmd; no separate install is needed.
 `steam_user` can be `anonymous` for public Workshop items. To use an existing
@@ -21,8 +23,9 @@ The GUI is a native utility on both platforms: an accent-orange install action,
 a card list with each mod's `icon=` PNG, folder, enabled `ON`/`OFF` state,
 click-to-toggle selection (Shift-click spans a range), double-click to update,
 and a compact activity log. The list can be
-filtered by name or folder, restricted to mods with an available update, and
-sorted by name or last update. Settings also switches the UI
+filtered by name or folder, and filtered from a dropdown to Updates, Locked, or
+Nontracked mods; an option only appears while at least one matching mod exists.
+The list can be sorted by name or last update. Settings also switches the UI
 between light and dark themes; the choice is stored in `config.ini`. `Check`
 refreshes update availability
 through the Steam Web API; `UPDATE` badges mark the results. On GUI start,
@@ -49,8 +52,27 @@ Each target has a `Lock updates` switch, off by default, including
 target are pinned: they are not checked for updates, are removed from
 `updates.tsv`, and `Update` / `Update all` skip them. The `Lock` / `Unlock`
 action stores a separate manual lock as the sixth `installed.tsv` column and
-survives restarts. Turning the target switch off releases its automatic lock;
-removing a server's `Mods=` entry also stops it from applying. `Share server`
+survives restarts. The seventh column records whether a copy came from
+SteamCMD import. Turning the target switch off releases its automatic lock;
+removing a server's `Mods=` entry also stops it from applying. Settings stores a
+SteamCMD download root for the built-in `Import` action. With an empty input it
+reads `steamapps/workshop/appworkshop_108600.acf` when present, otherwise the
+numeric folders under `steamapps/workshop/content/108600/`. With Workshop URLs
+or IDs in the input, it imports only those items. That path never invokes
+steamcmd. If the download root is unavailable or the item has no content
+folder, Import asks the public Steam Web API for the Workshop title (no API key
+or login), matches it case-insensitively against the folder name or `name=` in
+`mod.info`, and tracks only one exact untracked match without moving or
+rewriting it. Ambiguous title matches are skipped. With an empty input it
+still scans the configured download root. Only items with a readable
+`mod.info` are copied into `~/Zomboid/mods`; already tracked or installed IDs are
+skipped, and directory names still present in an emptied SteamCMD content folder
+are matched against `Zomboid/mods` so manually copied mods are not duplicated.
+The SteamCMD tree is strictly read-only: import never moves, rewrites, or
+deletes anything there, including when an imported copy is later removed.
+Imported records keep the ACF or Steam API `timeupdated` value and are marked
+`[imported]`.
+`Share server`
 copies the server's
 enabled Workshop IDs as a space-separated list that can be pasted into `Add` on
 another instance. To pin those same items there, run `pzmodmgr lock <ids>` or
@@ -133,7 +155,7 @@ Linux distribution (single self-extracting `.sh` with a `.desktop` entry):
 
 ```bash
 ./scripts/package_linux.sh
-./dist/PZModManager-0.2.11-linux-x86_64.sh
+./dist/PZModManager-0.3.0-linux-x86_64.sh
 ```
 
 GCC/Clang Release builds (Linux and the MinGW Windows build) default to size
