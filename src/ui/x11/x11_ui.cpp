@@ -29,7 +29,7 @@ constexpr int kW = 920, kH = 720;
 constexpr int kMargin = 24;
 constexpr int kInputX = 24, kInputY = 84, kInputW = 644, kInputH = 38;
 constexpr int kInstallX = 684, kInstallW = 212;
-constexpr int kFilterY = 158, kFilterH = 24;
+constexpr int kFilterY = 158, kFilterH = 24, kFilterW = 180;
 constexpr int kListTop = 192, kRowH = 64, kRowGap = 6, kRows = 5;
 constexpr int kCardW = 872;
 
@@ -212,6 +212,7 @@ void draw_button_icon(Display* d, Window w, GC gc, Btn b, int x, int cy,
     case Btn::SelectAll: glyph = &glyphs::kSelectAll; break;
     case Btn::Clear:
     case Btn::Cancel: glyph = &glyphs::kClear; break;
+    case Btn::Lock: glyph = &glyphs::kLock; break;
     case Btn::FilterAll:
     case Btn::FilterUpdates: glyph = &glyphs::kFilter; break;
     case Btn::Sort: glyph = &glyphs::kSort; break;
@@ -864,7 +865,7 @@ int run_ui(ModManager& mm) {
     };
 
     auto filter_clear_rect = []() -> Rect {
-        return {kMargin + 280 - 24, kFilterY + 2, 20, kFilterH - 4};
+        return {kMargin + kFilterW - 24, kFilterY + 2, 20, kFilterH - 4};
     };
 
     auto draw_input = [&](const Rect& r, const std::string& value,
@@ -1097,7 +1098,7 @@ int run_ui(ModManager& mm) {
 
         if (list_dirty && !busy) rebuild_visible();
 
-        draw_input({kMargin, kFilterY, 280, kFilterH}, filter_text,
+        draw_input({kMargin, kFilterY, kFilterW, kFilterH}, filter_text,
                    "Filter name or folder", filter_focus && !busy, !busy,
                    filter_text.empty() ? 0 : 26);
         if (!filter_text.empty()) {
@@ -1111,6 +1112,13 @@ int run_ui(ModManager& mm) {
         draw_button(Btn::FilterUpdates);
         draw_button(Btn::Sort);
         draw_button(Btn::Check);
+        const std::size_t selected_count = selected_ids.size() + selected_folders.size();
+        const std::string selected = selected_count == 0
+            ? "No selection"
+            : std::to_string(selected_count) + " selected";
+        const int selection_x = kMargin + kFilterW + 8;
+        text(dpy, win, gc, body, selection_x, kFilterY + 17,
+             elide(body, selected, 312 - 8 - selection_x), pal.muted);
         const int total = static_cast<int>(visible.size());
         std::string count;
         if (busy) {
@@ -1211,10 +1219,16 @@ int run_ui(ModManager& mm) {
                 }
                 if (has_update) {
                     const Rect pill{update_x, card.y + 22, pill_w, 20};
-                    fill(dpy, win, gc, pill.x, pill.y, pill.w, pill.h, pal.accent);
+                    const char* label = m.locked ? "LOCKED" : "UPDATE";
+                    if (m.locked) {
+                        fill(dpy, win, gc, pill.x, pill.y, pill.w, pill.h, pal.bg);
+                        frame(dpy, win, gc, pill.x, pill.y, pill.w, pill.h, pal.border_strong);
+                    } else {
+                        fill(dpy, win, gc, pill.x, pill.y, pill.w, pill.h, pal.accent);
+                    }
                     text(dpy, win, gc, body,
-                         pill.x + (pill.w - text_width(body, "UPDATE")) / 2,
-                         pill.y + 14, "UPDATE", pal.on_accent);
+                         pill.x + (pill.w - text_width(body, label)) / 2,
+                         pill.y + 14, label, m.locked ? pal.muted : pal.on_accent);
                 }
             }
 
@@ -1234,11 +1248,6 @@ int run_ui(ModManager& mm) {
         draw_button(Btn::Update);
         draw_button(Btn::UpdateAll);
         draw_button(Btn::Remove);
-        const std::size_t selected_count = selected_ids.size() + selected_folders.size();
-        const std::string selected = selected_count == 0
-            ? "No selection"
-            : std::to_string(selected_count) + " selected";
-        text(dpy, win, gc, body, 276, kActionY + 21, selected, pal.muted);
 
         fill(dpy, win, gc, kMargin, kActivityY, kCardW, kActivityH, pal.surface);
         frame(dpy, win, gc, kMargin, kActivityY, kCardW, kActivityH, pal.border);
@@ -1777,7 +1786,7 @@ int run_ui(ModManager& mm) {
                     if (in_rect(x, y, kInputX, kInputY, kInputW, kInputH)) {
                         filter_focus = false;
                         request_paste(XA_PRIMARY, false, ev.xbutton.time);
-                    } else if (in_rect(x, y, kMargin, kFilterY, 280, kFilterH)) {
+                    } else if (in_rect(x, y, kMargin, kFilterY, kFilterW, kFilterH)) {
                         filter_focus = true;
                         request_paste(XA_PRIMARY, false, ev.xbutton.time);
                     }
@@ -1866,7 +1875,7 @@ int run_ui(ModManager& mm) {
                         break;
                     }
                 }
-                if (in_rect(x, y, kMargin, kFilterY, 280, kFilterH)) {
+                if (in_rect(x, y, kMargin, kFilterY, kFilterW, kFilterH)) {
                     filter_focus = true;
                     redraw();
                     break;
