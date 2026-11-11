@@ -365,26 +365,58 @@ void test_version_locks(const pz::fs::path& root) {
     check(by_name.ok && mm.manually_locked(777), "lock accepts an installed mod name");
     check(pz::run_command(mm, "unlock 777", logfn).ok, "name-lock fixture unlocked");
 
-    // Server targets lock their enabled items without storing a manual flag.
+    // A server target is not locked unless its per-target switch is on.
     write_file(cfg.zomboid_dir / "Server" / "local.ini",
                "Mods=\\FixtureLock\nWorkshopItems=777\n");
-    check(mm.server_locked(777) && mm.locked(777),
-          "server-enabled item is locked automatically");
-    check(mm.lock_reason(777) == "server-enabled", "server lock reason is reported");
-    auto skipped = mm.update_one(777, logfn);
-    check(skipped.ok && skipped.message.find("Locked (server-enabled)") != std::string::npos,
-          "update_one skips a server-locked item before checking Steam");
-    auto all = mm.update_all(logfn);
-    check(all.ok && all.message.find("skipped 1 locked") != std::string::npos,
-          "update_all reports server-locked items as skipped");
+    check(!mm.server_locked(777) && !mm.locked(777),
+          "server-enabled items are unlocked by default");
+    const auto targets = mm.activation_targets();
+    auto server = std::find_if(targets.begin(), targets.end(), [](const pz::ActivationTarget& t) {
+        return t.kind == pz::ActivationKind::Server && t.name == "local";
+    });
+    check(server != targets.end(), "server target discovered");
+    if (server != targets.end()) {
+        auto target_lock = mm.set_target_locked(server->kind, server->name, true, logfn);
+        check(target_lock.ok && mm.server_locked(777) && mm.locked(777),
+              "turning on a target lock pins its enabled items");
+        check(mm.lock_reason(777) == "target-enabled",
+              "target lock reason is reported");
 
-    // Removing the manual flag does not override the server's protection.
-    auto still_server = pz::run_command(mm, "unlock 777", logfn);
-    check(still_server.ok && mm.locked(777) && !mm.manually_locked(777),
-          "unlock leaves a server-enabled item locked");
+        write_file(cfg.data_dir / "updates.tsv", "777\t1\n");
+        {
+            pz::Config restarted_cfg = cfg;
+            pz::load_config(restarted_cfg);
+            pz::ModManager restarted(restarted_cfg);
+            check(restarted.locked(777), "target lock survives restart");
+            check(read_file(cfg.data_dir / "updates.tsv").find("777") ==
+                      std::string::npos,
+                  "locked items are removed from updates.tsv on load");
+        }
+
+        auto skipped = mm.update_one(777, logfn);
+        check(skipped.ok &&
+                  skipped.message.find("Locked (target-enabled)") != std::string::npos,
+              "update_one skips a target-locked item before checking Steam");
+        auto all = mm.update_all(logfn);
+        check(all.ok && all.message.find("skipped 1 locked") != std::string::npos,
+              "update_all reports target-locked items as skipped");
+
+        // Removing the manual flag does not override the target switch.
+        auto still_target = pz::run_command(mm, "unlock 777", logfn);
+        check(still_target.ok && mm.locked(777) && !mm.manually_locked(777),
+              "unlock leaves a target-locked item locked");
+
+        auto target_unlock = mm.set_target_locked(server->kind, server->name, false, logfn);
+        check(target_unlock.ok && !mm.locked(777),
+              "turning off the target lock releases its items");
+    }
+    auto cli_lock = pz::run_command(mm, "target-lock 1 on", logfn);
+    check(cli_lock.ok && mm.locked(777), "target-lock command enables a target lock");
+    auto cli_unlock = pz::run_command(mm, "target-lock 1 off", logfn);
+    check(cli_unlock.ok && !mm.locked(777), "target-lock command disables a target lock");
     pz::error_code ec;
     pz::fs::remove(cfg.zomboid_dir / "Server" / "local.ini", ec);
-    check(!ec && !mm.locked(777), "removing the server list releases the automatic lock");
+    check(!ec && !mm.locked(777), "removing the server list leaves items unlocked");
 
     // A shared ID list can be pasted into lock on another instance.
     auto shared = pz::run_command(mm, "lock 777", logfn);

@@ -204,6 +204,9 @@ ModManager::ModManager(Config cfg)
     prune_stale_state(cfg_.data_dir);
     load_db();
     load_update_state();
+    // A lock can be added while a stale update entry is still on disk. Keep
+    // the visible update file consistent with the current lock state.
+    save_update_state();
     load_app_update_state();
 }
 
@@ -241,6 +244,7 @@ Result ModManager::set_zomboid_dir(const fs::path& dir) {
     app_update_available_ = false;
     load_db();
     load_update_state();
+    save_update_state();
     load_app_update_state();
     return {true, "Zomboid folder set to " + normalized.string()};
 }
@@ -404,8 +408,20 @@ Result ModManager::update_all(const LogFn& log) {
 }
 
 Result ModManager::check_updates(const LogFn& log) {
-    const auto ids = unique_installed_ids();
+    const auto all_ids = unique_installed_ids();
     const auto server_locks = server_locked_ids();
+    std::vector<std::uint64_t> ids;
+    ids.reserve(all_ids.size());
+    int locked_skipped = 0;
+    for (auto id : all_ids) {
+        if (manually_locked(id) || is_locked_in(server_locks, id)) {
+            updates_.erase(id);
+            log("locked: " + std::to_string(id) + " (not checked)");
+            ++locked_skipped;
+            continue;
+        }
+        ids.push_back(id);
+    }
     const auto remote_times = fetch_remote_times(ids);
     int checked = 0, available = 0, failed = 0;
     for (std::size_t i = 0; i < ids.size(); ++i) {
@@ -421,17 +437,17 @@ Result ModManager::check_updates(const LogFn& log) {
         updates_[id] = has_update;
         if (has_update) {
             ++available;
-            const bool is_locked = manually_locked(id) || is_locked_in(server_locks, id);
-            log("update available" + std::string(is_locked ? " (locked): " : ": ") +
-                std::to_string(id));
+            log("update available: " + std::to_string(id));
         } else {
             log("up to date: " + std::to_string(id));
         }
     }
-    if (!ids.empty()) record_update_check();
+    if (!all_ids.empty()) record_update_check();
     save_update_state();
     std::string msg = "Checked " + std::to_string(checked) + " mod(s), " +
                       std::to_string(available) + " update(s) available";
+    if (locked_skipped != 0)
+        msg += ", skipped " + std::to_string(locked_skipped) + " locked";
     if (failed != 0) msg += ", " + std::to_string(failed) + " check(s) failed";
     return {true, msg};
 }
@@ -454,6 +470,7 @@ Result ModManager::check_app_release(const LogFn& log) {
 }
 
 bool ModManager::update_available(std::uint64_t workshop_id) const {
+    if (locked(workshop_id)) return false;
     auto it = updates_.find(workshop_id);
     return it != updates_.end() && it->second;
 }
@@ -472,9 +489,9 @@ bool ModManager::is_locked_in(const std::vector<std::uint64_t>& ids,
 std::vector<std::uint64_t> ModManager::server_locked_ids() const {
     std::vector<std::uint64_t> ids;
     for (const auto& target : activation_targets()) {
-        if (target.kind != ActivationKind::Server) continue;
+        if (!target.lock_updates) continue;
         // Only Mods= is enabled. WorkshopItems= may also list optional items,
-        // so it is not used to decide what a server has actually enabled.
+        // so it is not used to decide what a target has actually enabled.
         for (const auto& mod : db_) {
             auto info = read_mod_info(cfg_.user_mods_dir / mod.folder, game_version_);
             if (!info || info->id.empty()) continue;
@@ -496,8 +513,50 @@ bool ModManager::locked(std::uint64_t workshop_id) const {
 
 std::string ModManager::lock_reason(std::uint64_t workshop_id) const {
     if (manually_locked(workshop_id)) return "pinned";
-    if (server_locked(workshop_id)) return "server-enabled";
+    if (server_locked(workshop_id)) return "target-enabled";
     return {};
+}
+
+Result ModManager::set_target_locked(ActivationKind kind, const std::string& name,
+                                     bool lock_value, const LogFn& log) {
+    auto targets = activation_targets();
+    auto target = std::find_if(targets.begin(), targets.end(), [&](const ActivationTarget& t) {
+        return t.kind == kind && t.name == name;
+    });
+    if (target == targets.end())
+        return {false, "Activation target not found"};
+
+    const std::string key = activation_target_key(*target);
+    std::vector<std::string> next = cfg_.locked_targets;
+    auto found = std::find(next.begin(), next.end(), key);
+    if (lock_value && found == next.end()) {
+        next.push_back(key);
+    } else if (!lock_value && found != next.end()) {
+        next.erase(found);
+    }
+    if (next != cfg_.locked_targets) {
+        cfg_.locked_targets = std::move(next);
+        if (!save_config(cfg_))
+            return {false, "Could not save the target lock setting"};
+    }
+
+    if (lock_value) {
+        bool changed = false;
+        for (const auto& mod : db_) {
+            auto info = read_mod_info(cfg_.user_mods_dir / mod.folder, game_version_);
+            if (!info || info->id.empty() ||
+                std::find(target->mod_ids.begin(), target->mod_ids.end(), info->id) ==
+                    target->mod_ids.end())
+                continue;
+            if (updates_.erase(mod.workshop_id) != 0) changed = true;
+        }
+        if (changed) save_update_state();
+    }
+
+    const std::string message = std::string("Updates ") +
+        (lock_value ? "locked" : "unlocked") + " for " + target->label;
+    log(message);
+    return {true, message};
 }
 
 Result ModManager::set_locked(const std::vector<std::uint64_t>& workshop_ids,
@@ -506,6 +565,7 @@ Result ModManager::set_locked(const std::vector<std::uint64_t>& workshop_ids,
     int changed = 0;
     int matched = 0;
     int missing = 0;
+    bool updates_changed = false;
     for (auto id : workshop_ids) {
         bool found = false;
         for (auto& mod : db_) {
@@ -518,8 +578,10 @@ Result ModManager::set_locked(const std::vector<std::uint64_t>& workshop_ids,
             }
         }
         if (!found) ++missing;
+        if (lock_value && updates_.erase(id) != 0) updates_changed = true;
     }
     if (changed != 0) save_db();
+    if (updates_changed) save_update_state();
     const char* verb = lock_value ? "locked" : "unlocked";
     std::string msg = std::string(verb) + " " + std::to_string(matched) +
                       " mod folder(s)";
@@ -559,7 +621,7 @@ bool ModManager::reload_installed() {
     for (const auto& mod : db_) present.insert(mod.workshop_id);
     bool updates_changed = false;
     for (auto it = updates_.begin(); it != updates_.end();) {
-        if (present.count(it->first) == 0) {
+        if (present.count(it->first) == 0 || locked(it->first)) {
             it = updates_.erase(it);
             updates_changed = true;
         } else {
@@ -883,7 +945,14 @@ std::uint64_t ModManager::recorded_time(std::uint64_t id) const {
 }
 
 std::vector<ActivationTarget> ModManager::activation_targets() const {
-    return discover_activation_targets(cfg_.zomboid_dir, game_version_);
+    auto targets = discover_activation_targets(cfg_.zomboid_dir, game_version_);
+    for (auto& target : targets) {
+        const std::string key = activation_target_key(target);
+        target.lock_updates =
+            std::find(cfg_.locked_targets.begin(), cfg_.locked_targets.end(), key) !=
+            cfg_.locked_targets.end();
+    }
+    return targets;
 }
 
 std::vector<InstalledMod> ModManager::list_all() const {
@@ -1207,7 +1276,8 @@ void ModManager::load_update_state() {
         std::uint64_t workshop_id = 0;
         if (!parse_stored_number(parts[0], workshop_id)) return;
         if (parts.size() >= 2 && parts[1] == "0") return;
-        if (is_installed(workshop_id)) updates_[workshop_id] = true;
+        if (is_installed(workshop_id) && !locked(workshop_id))
+            updates_[workshop_id] = true;
     });
 }
 
@@ -1233,7 +1303,7 @@ void ModManager::save_db() const {
 void ModManager::save_update_state() const {
     std::string text;
     for (const auto& entry : updates_) {
-        if (!entry.second) continue;
+        if (!entry.second || locked(entry.first)) continue;
         text += std::to_string(entry.first);
         text += "\t1\n";
     }

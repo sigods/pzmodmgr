@@ -189,10 +189,24 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         for (std::size_t i = 0; i < targets.size(); ++i) {
             const auto& t = targets[i];
             log(std::to_string(i) + ": " + t.label + " (" +
-                std::to_string(t.mod_ids.size()) + " mod ID(s))");
+                std::to_string(t.mod_ids.size()) + " mod ID(s))" +
+                (t.lock_updates ? " [updates locked]" : ""));
         }
         return {true, std::to_string(targets.size()) +
                       " activation target(s); use enable/disable <index> <Workshop IDs>"};
+    }
+    if (cmd == "target-lock") {
+        const auto [index_text, state] = split_first_word(arg);
+        if (index_text.empty() || (state != "on" && state != "off"))
+            return {false, "expected: target-lock <index> on|off"};
+        if (index_text.find_first_not_of("0123456789") != std::string::npos)
+            return {false, "unknown target index: " + index_text};
+        auto targets = mm.activation_targets();
+        const unsigned long index = std::strtoul(index_text.c_str(), nullptr, 10);
+        if (index >= targets.size())
+            return {false, "unknown target index: " + index_text};
+        const auto& target = targets[index];
+        return mm.set_target_locked(target.kind, target.name, state == "on", log);
     }
     if (cmd == "set-enabled") {
         const auto [index_text, rest] = split_first_word(arg);
@@ -274,7 +288,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
         if (cmd == "unlock") {
             for (auto id : ids) {
                 if (mm.server_locked(id))
-                    log("still locked by a server target: " + std::to_string(id));
+                    log("still locked by an enabled target: " + std::to_string(id));
             }
         }
         return result;
@@ -298,7 +312,7 @@ Result run_command(ModManager& mm, const std::string& line, const LogFn& log) {
             std::string line = m.name + " [" + m.folder + "] id=" +
                                std::to_string(m.workshop_id);
             if (m.locked) line += " [locked]";
-            else if (mm.server_locked(m.workshop_id)) line += " [server lock]";
+            else if (mm.server_locked(m.workshop_id)) line += " [target lock]";
             log(line);
         }
         return {true, std::to_string(mods.size()) + " mod(s)"};

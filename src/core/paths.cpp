@@ -1,5 +1,6 @@
 #include "core/paths.hpp"
 #include "core/text.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -187,6 +188,10 @@ void load_config(Config& c) {
         } else if (k == "auto_enable") {
             auto_enable = v == "1" || v == "on" || v == "true" || v == "yes";
             has_auto_enable = true;
+        } else if (k == "locked_target" && !v.empty()) {
+            if (std::find(c.locked_targets.begin(), c.locked_targets.end(), v) ==
+                c.locked_targets.end())
+                c.locked_targets.push_back(v);
         }
     });
 
@@ -216,6 +221,8 @@ bool save_config(const Config& c) {
     text += "zomboid_dir=" + c.zomboid_dir.string() + "\n";
     text += std::string("dark_mode=") + (c.dark_mode ? "1" : "0") + "\n";
     text += std::string("auto_enable=") + (c.auto_enable ? "1" : "0") + "\n";
+    for (const auto& key : c.locked_targets)
+        text += "locked_target=" + key + "\n";
     return write_text_atomic(file, text);
 }
 
