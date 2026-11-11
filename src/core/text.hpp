@@ -7,6 +7,15 @@
 
 namespace pz {
 
+// Appends a fixed-width lowercase hexadecimal number. This keeps MinGW's
+// printf formatter out of the static runtime for the few places that only need
+// hex digits.
+inline void append_hex(std::string& out, std::uint32_t value, int digits) {
+    static constexpr char kDigits[] = "0123456789abcdef";
+    for (int shift = (digits - 1) * 4; shift >= 0; shift -= 4)
+        out += kDigits[(value >> shift) & 0x0f];
+}
+
 // The core uses C stdio instead of <fstream>/<sstream>: on MinGW those headers
 // pull the whole locale and iostream machinery into the statically linked
 // executable. _wfopen keeps non-ASCII Zomboid/mod paths working on Windows.

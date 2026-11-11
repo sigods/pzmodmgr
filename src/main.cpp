@@ -29,7 +29,9 @@ int run_app(int argc, char** argv) {
             std::fputs(s.c_str(), stdout);
             std::fputc('\n', stdout);
         });
-        std::fprintf(stdout, "%s%s\n", r.ok ? "OK: " : "ERROR: ", r.message.c_str());
+        std::fputs(r.ok ? "OK: " : "ERROR: ", stdout);
+        std::fputs(r.message.c_str(), stdout);
+        std::fputc('\n', stdout);
         return r.ok ? 0 : 1;
     }
     return run_ui(mm);   // GUI mode

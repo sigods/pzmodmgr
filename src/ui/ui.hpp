@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <ctime>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pz {
@@ -82,6 +83,40 @@ struct ModFilterCounts {
     int locked = 0;
     int nontracked = 0;
 };
+
+inline bool ascii_less(const std::string& a, const std::string& b) {
+    const std::size_t common = std::min(a.size(), b.size());
+    for (std::size_t i = 0; i < common; ++i) {
+        unsigned char ca = static_cast<unsigned char>(a[i]);
+        unsigned char cb = static_cast<unsigned char>(b[i]);
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<unsigned char>(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<unsigned char>(cb - 'A' + 'a');
+        if (ca != cb) return ca < cb;
+    }
+    return a.size() < b.size();
+}
+
+// The row list is small (tens of installed items), so a stable insertion sort
+// is cheaper in code size than instantiating std::stable_sort's merge path for
+// both sort orders.
+inline void stable_sort_rows(std::vector<ModRow>& rows, bool by_update) {
+    for (std::size_t i = 1; i < rows.size(); ++i) {
+        ModRow value = std::move(rows[i]);
+        std::size_t j = i;
+        while (j > 0) {
+            const ModRow& previous = rows[j - 1];
+            bool before = false;
+            if (by_update && value.time_updated != previous.time_updated)
+                before = value.time_updated > previous.time_updated;
+            else
+                before = ascii_less(value.name, previous.name);
+            if (!before) break;
+            rows[j] = std::move(rows[j - 1]);
+            --j;
+        }
+        rows[j] = std::move(value);
+    }
+}
 
 inline std::string join_workshop_ids(const std::vector<std::uint64_t>& ids) {
     std::string out;
@@ -214,19 +249,7 @@ inline std::vector<ModRow> filter_mod_rows(const std::vector<ModRow>& rows,
         }
         visible.push_back(row);
     }
-    if (sort_mode == 0) {
-        std::stable_sort(visible.begin(), visible.end(),
-            [](const ModRow& a, const ModRow& b) {
-                return ascii_lowercase(a.name) < ascii_lowercase(b.name);
-            });
-    } else {
-        std::stable_sort(visible.begin(), visible.end(),
-            [](const ModRow& a, const ModRow& b) {
-                if (a.time_updated != b.time_updated)
-                    return a.time_updated > b.time_updated;
-                return ascii_lowercase(a.name) < ascii_lowercase(b.name);
-            });
-    }
+    stable_sort_rows(visible, sort_mode != 0);
     return visible;
 }
 

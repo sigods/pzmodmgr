@@ -5,10 +5,11 @@
 #include "core/paths.hpp"
 #include "core/steamcmd.hpp"
 #include "core/updater.hpp"
-#include "core/url.hpp"
+#include "core/url_c.h"
 #include "ui/ui.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -62,28 +63,47 @@ void make_executable(const pz::fs::path& p) {
     check(!ec, "make executable: " + p.string());
 }
 
+bool parse_one_workshop_id(const std::string& input, std::uint64_t& id) {
+    return pz_url_parse_workshop_id(input.data(), input.size(), &id) != 0;
+}
+
+std::vector<std::uint64_t> parse_workshop_ids(const std::string& input) {
+    std::vector<std::uint64_t> result;
+    pz_url_ids parsed{};
+    if (!pz_url_parse_workshop_ids(input.data(), input.size(), &parsed)) {
+        pz_url_ids_free(&parsed);
+        return result;
+    }
+    if (parsed.count != 0) result.assign(parsed.items, parsed.items + parsed.count);
+    pz_url_ids_free(&parsed);
+    return result;
+}
+
 void test_parse_workshop_id() {
-    check(pz::parse_workshop_id("123456789").value_or(0) == 123456789, "plain numeric id");
-    check(pz::parse_workshop_id("  42  ").value_or(0) == 42, "numeric id with whitespace");
+    std::uint64_t id = 0;
+    check(parse_one_workshop_id("123456789", id) && id == 123456789,
+          "plain numeric id");
+    check(parse_one_workshop_id("  42  ", id) && id == 42,
+          "numeric id with whitespace");
 
     const char* url = "https://steamcommunity.com/sharedfiles/filedetails/?id=123456789&searchtext=x";
-    check(pz::parse_workshop_id(url).value_or(0) == 123456789, "workshop url");
+    check(parse_one_workshop_id(url, id) && id == 123456789, "workshop url");
     const char* workshop_url =
         "https://steamcommunity.com/workshop/filedetails/?id=3171167894";
-    check(pz::parse_workshop_id(workshop_url).value_or(0) == 3171167894,
+    check(parse_one_workshop_id(workshop_url, id) && id == 3171167894,
           "workshop/filedetails url");
 
-    check(!pz::parse_workshop_id("").has_value(), "empty input rejected");
-    check(!pz::parse_workshop_id("no id here").has_value(), "text without id rejected");
-    check(!pz::parse_workshop_id("id=abc").has_value(), "non-numeric id rejected");
-    check(!pz::parse_workshop_id("123456789012345678901").has_value(), "overlong id rejected");
+    check(!parse_one_workshop_id("", id), "empty input rejected");
+    check(!parse_one_workshop_id("no id here", id), "text without id rejected");
+    check(!parse_one_workshop_id("id=abc", id), "non-numeric id rejected");
+    check(!parse_one_workshop_id("123456789012345678901", id), "overlong id rejected");
 
-    auto multi = pz::parse_workshop_ids(
+    auto multi = parse_workshop_ids(
         "123\t456\nhttps://steamcommunity.com/sharedfiles/filedetails/?id=789 123");
     check(multi.size() == 3 && multi[0] == 123 && multi[1] == 456 && multi[2] == 789,
           "multiple IDs parsed in order and deduplicated");
-    check(pz::parse_workshop_ids("   ").empty(), "empty batch has no IDs");
-    check(pz::parse_workshop_ids("123 not-an-id").empty(),
+    check(parse_workshop_ids("   ").empty(), "empty batch has no IDs");
+    check(parse_workshop_ids("123 not-an-id").empty(),
           "a bad token rejects the whole batch");
 }
 
@@ -648,6 +668,43 @@ void test_read_mod_info(const pz::fs::path& root) {
     check(pz::version_range(pz::ModInfo{}).empty(), "empty version range stays empty");
 }
 
+void test_fixture_mod_info() {
+#ifdef PZMODMGR_TEST_FIXTURES
+    const pz::fs::path fixtures(PZMODMGR_TEST_FIXTURES);
+    const pz::fs::path basic = fixtures / "mod_info" / "basic";
+    auto info = pz::read_mod_info(basic);
+    check(info.has_value(), "fixture mod.info readable");
+    if (info) {
+        check(info->id == "fixturemod" && info->name == "Fixture Mod" &&
+                  info->author == "Fixture Author" && info->mod_version == "2.0",
+              "fixture mod.info fields parsed");
+        check(info->required_ids.size() == 2 &&
+                  info->required_ids[0] == "damnlib" &&
+                  info->required_ids[1] == "damnlibGlass",
+              "fixture requirements are trimmed, de-escaped, and deduplicated");
+        check(info->icon == basic / "art" / "icon.png", "fixture icon resolved");
+    }
+
+    auto single = pz::discover_mod_roots(fixtures / "discover" / "single");
+    check(single.size() == 1 && single[0].filename() == "single",
+          "fixture single-root discovery");
+
+    auto multi = pz::discover_mod_roots(fixtures / "discover" / "multi");
+    bool saw_a = false, saw_b = false;
+    for (const auto& root : multi) {
+        saw_a = saw_a || root.filename() == "A";
+        saw_b = saw_b || root.filename() == "B";
+    }
+    check(multi.size() == 2 && saw_a && saw_b, "fixture mods/ and Contents/mods/ discovery");
+
+    auto versioned = pz::discover_mod_roots(fixtures / "discover" / "versioned");
+    check(versioned.size() == 1 && versioned[0].filename() == "HorseMod",
+          "fixture versioned mod root discovery");
+#else
+    std::printf("SKIP: PZMODMGR_TEST_FIXTURES not defined\n");
+#endif
+}
+
 void test_missing_requirements(const pz::fs::path& root) {
     pz::Config cfg;
     cfg.zomboid_dir = root / "deps" / "Zomboid";
@@ -775,6 +832,23 @@ void test_ui_helpers() {
                                only_beta_update, never_locked);
     check(visible.size() == 1 && visible[0].workshop_id == 1,
           "UI update filter uses the update callback");
+
+    pz::InstalledMod newer_z;
+    newer_z.workshop_id = 3;
+    newer_z.folder = "Zed";
+    newer_z.name = "Zed";
+    newer_z.time_updated = 20;
+    pz::InstalledMod newer_a;
+    newer_a.workshop_id = 4;
+    newer_a.folder = "Able";
+    newer_a.name = "Able";
+    newer_a.time_updated = 20;
+    visible = pz::visible_mods({beta, newer_z, alpha, newer_a}, "",
+                               pz::ModFilter::All, 1, never_update, never_locked);
+    check(visible.size() == 4 && visible[0].workshop_id == 4 &&
+              visible[1].workshop_id == 3 && visible[2].workshop_id == 2 &&
+              visible[3].workshop_id == 1,
+          "UI list sorts by update time, then name");
 
     pz::InstalledMod manual;
     manual.folder = "Manual";
@@ -1661,6 +1735,7 @@ int main() {
     test_corrupt_db(root);
     test_version_locks(root);
     test_read_mod_info(root);
+    test_fixture_mod_info();
     test_missing_requirements(root);
     test_discover_mod_roots(root);
     test_time_updated_parser();

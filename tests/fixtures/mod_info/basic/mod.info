@@ -1,0 +1,8 @@
+id=fixturemod
+name=Fixture Mod
+author=Fixture Author
+modversion=2.0
+versionMin=42.0
+versionMax=42.9
+require=\damnlib, \damnlibGlass, \damnlib
+icon=art/icon.png

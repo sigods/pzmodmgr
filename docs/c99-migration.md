@@ -1,7 +1,6 @@
 # C99/C89 migration assessment
 
-Status after the native filesystem branch, URL port, and binary/memory
-optimization pass.
+Status after the 0.3.0 Windows static-runtime pass and the C99 native-host rewrite.
 
 ## What is already done
 
@@ -21,51 +20,250 @@ optimization pass.
   from the application's hot paths. The replacements are `pz::thread`,
   `pz::mutex`/`pz::lock_guard`, `pz::error_code`, epoch-seconds timestamps, and
   the vector-backed `pz::flat_map`/`pz::flat_set`.
-- No libstdc++ archive member is pulled into the final link. The remaining
-  `std::string`, `std::vector`, `std::wstring`, `std::optional`, and
-  `std::string_view` uses are header-instantiated or covered by the small
-  abort-based runtime shim.
+- Linux still links only the small header-instantiated `std::string`,
+  `std::vector`, `std::wstring`, `std::optional`, and `std::string_view`
+  surface. Windows also pulls libstdc++'s static string/exception support and
+  winpthreads; this pass removes the avoidable terminate/demangler and printf
+  formatter paths, but that runtime remains in the app image.
 - `std::function` is gone. `LogFn` is now a function pointer plus an opaque
   context, with a small templated constructor for existing lambdas. The
   internal capture sink in `steamcmd.cpp` is a template instead of
   `std::function`.
-- The URL parser is a C99 translation unit. `src/core/url.c` contains the
-  parsing logic and `src/core/url.cpp` is only an adapter to the existing
-  `std::optional`/`std::vector` API. CMake now enables `C` and builds it with
-  `C_STANDARD 99`.
+- Small-list sorting no longer instantiates `std::sort`/`std::stable_sort`.
+  Mod-info version selection, save/server target ordering, and UI row ordering
+  use local stable insertion sorts. The stripped Linux app fell from 219,288
+  to 207,000 bytes and the native host from 96,408 to 92,312 bytes on the
+  rebased `0.3.0` branch. The UI sort benchmark was unchanged within noise
+  (hyperfine: +1.4% over 20,000 runs). `std::from_chars` was also replaced by
+  bounded decimal parsing in `mod_info.cpp` and `steamcmd.cpp`.
+- The URL parser is a C99 translation unit and the only URL implementation.
+  `src/core/mod_manager.cpp`, the browser native host, and the batch command
+  parser call the C API directly; tests do the same. The old
+  `url.cpp`/`url.hpp` adapter has been removed. CMake enables `C` and builds
+  the parser with `C_STANDARD 99`.
+- The browser native host is now C99 (`src/native/native_host.c`). It locates
+  the sibling `pzmodmgr` executable, runs the normal `add`/`update` CLI, captures
+  its output, and returns the same framed JSON. It links only `url.c` and the C
+  runtime; it does not link `pzcore` or any C++ runtime. The stripped host is
+  10,160 bytes on Linux and 19,456 on Windows after the path-join fix below.
 - Linux executables are linked with the static libstdc++ and libgcc runtimes,
   so the shipped binaries have no external C++ runtime dependency. This is a
   runtime milestone, not a source-level C99 conversion: the binary still
   contains C++ code and the build still uses a C++ compiler.
 
-Measured sizes (before = `v0.2.4`, after = this branch; Windows packaging uses
-UPX 4.2.4 for both):
+Historical sizes from the first reduction pass (before = `v0.2.4`; Windows
+packaging used UPX 4.2.4 for both). Current final sizes are below in the 0.3.0
+Windows size pass:
 
 | Artifact | Before | Now |
 | --- | ---: | ---: |
 | Windows `pzmodmgr.exe` stripped | 1,431,747 | 463,161 |
 | Windows `pzmodmgr.exe` UPX | 450,755 | 208,697 |
-| Windows native host stripped | 1,270,245 | 318,444 |
-| Windows setup (UPX) | 1,005,399 | 441,582 |
-| Windows ZIP (UPX build) | 1,031,282 | 449,981 |
+| Windows native host stripped | 1,270,245 | 286,700 |
+| Windows setup (UPX) | 1,005,399 | 427,758 |
+| Windows ZIP (UPX build) | 1,031,282 | 433,732 |
 | Linux `pzmodmgr` stripped, dynamic runtime | 338,280 | 334,184 |
 | Linux `pzmodmgr` stripped, self-contained runtime | 338,280 | 215,192 |
 | Linux dynamic `libstdc++` imports | 56 | 0 |
 
 The shipped Linux binary has no `GLIBCXX` imports and no
-`libstdc++`/`libgcc_s` dependency. `ldd` now lists only Xlib, libm, libc, and
-Xlib's transitive X libraries. Windows imports only system DLLs. The remaining
-size is primarily the two UIs and header-instantiated container code.
+`libstdc++`/`libgcc_s` dependency. `ldd` lists only Xlib, libm, libc, and Xlib's
+transitive X libraries. Windows imports only system DLLs. The remaining size is
+mostly the two UIs, header-instantiated container code, and the Windows runtime
+described above.
+
+## 0.3.0 Windows size pass
+
+The Windows app was measured after the 0.2.6 rebase, then reduced without
+changing its feature set. Sizes are stripped release binaries; UPX is not
+included in these comparisons.
+
+| Artifact | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Windows `pzmodmgr.exe` | 450,328 | **310,272** | -140,056 (-31.1%) |
+| Windows native host | 281,068 | **19,456** | -261,612 (-93.1%) |
+| Linux `pzmodmgr` | 194,560 | **194,560** | unchanged |
+| Linux native host | 79,872 | **10,160** | -69,712 (-87.3%) |
+
+Each Windows change was measured separately:
+
+| Change | App before | App after | Host before | Host after |
+| --- | ---: | ---: | ---: | ---: |
+| Minimal verbose terminate handler (drops `cp-demangle.o`) | 450,328 | 391,448 | 281,068 | 221,676 |
+| Replace `snprintf` hex/decimal formatting | 391,448 | 391,960 | 221,676 | 196,520 |
+| Replace the last `fprintf` in CLI output | 391,960 | **365,718** | 196,520 | **196,520** |
+| C99 native host, no `pzcore` link | 365,718 | **365,718** | 196,520 | **48,728** |
+| Strip-all overlay + five-frame ICO + LTO | 365,718 | **310,272** | 48,728 | **46,080** |
+| Native-host path join without `swprintf` | 310,272 | **310,272** | 46,080 | **19,456** |
+
+The app temporarily grew by 512 bytes when `snprintf` was removed because
+`main.cpp` still called `fprintf`; replacing that final formatted write removed
+MinGW's `__mingw_pformat`/`gdtoa` chain from the app as well. The host source had
+no `fprintf`, so it dropped 25,156 bytes at the `snprintf` step. A later
+`swprintf` removal cut the host to 19,456 bytes.
+
+### Section comparison
+
+| Section/group | Linux app | Windows app | Difference |
+| --- | ---: | ---: | ---: |
+| `.text` | 161,497 | 256,016 | +94,519 |
+| read-only data (`.rodata`+`.data.rel.ro` / `.rdata`) | 14,856 | 23,288 | +8,432 |
+| unwind/SEH (`.eh_frame*` / `.pdata`+`.xdata`) | 172 | 15,016 | +14,844 |
+| resources (`.rsrc`) | 0 | 46,072 | +46,072 |
+| imports/dynamic tables | 13,877 | 8,776 | -5,101 |
+| relocations | 7,056 | 612 | -6,444 |
+| headers/alignment | 3,807 | 12,642 | +8,835 |
+| **File size** | **194,560** | **365,718** | **+171,158** |
+
+The same pass produced a 323,540-byte Windows ZIP (from 433,732 in the first
+UPX build); the setup was 807,089 bytes without UPX here, so it is not compared
+to the earlier UPX-packed setup.
+
+The Windows-only parts are therefore:
+
+- `.rsrc` 46,072 bytes at the time: a 43,233-byte nine-frame PNG icon plus
+  manifest and version info. The icon is already PNG-compressed; trimming it
+  means dropping resolutions, not changing the encoding.
+- `.pdata` + `.xdata` 15,016 bytes: x64 SEH/unwind metadata. Linux carries only
+  172 bytes of `.eh_frame` because it is built without unwind tables. Removing
+  the Windows metadata would break stack walking and crash handling.
+- PE headers/alignment 12,642 bytes versus about 3,807 bytes of ELF headers.
+- `.idata` 8,776 bytes of import tables, against Linux dynamic symbols and
+  relocations.
+- Static runtime still embedded in `.text`: about 27.5 KB of winpthreads plus
+  MinGW startup/CRT and the libstdc++ string/exception path. The pthread code
+  is pulled by libstdc++'s exception/TLS support, not by app code.
+
+What was tried and rejected:
+
+- `-Wl,--no-seh` would remove the 15 KB unwind section but breaks x64 stack
+  unwinding; not used.
+- `-Wl,--disable-dynamicbase` would remove 612 bytes of `.reloc` but disables
+  ASLR; not used.
+- `-fno-threadsafe-statics` saved only 479 bytes (the UI statics are already
+  single-threaded), not enough to justify the weaker guarantee.
+- LTO originally hit the `binds_to_current_def_p` ICE on MinGW GCC 15.2; the
+  single-partition workaround below makes it usable.
+
+### PE overlay and icon follow-up
+
+A later pass found that `strip --strip-unneeded` left a 252-entry COFF symbol
+table after the last PE section. It is a 9,399-byte overlay with no runtime
+value, and its size changes with build paths. Switching the Windows packaging
+script to `strip --strip-all` removes it. At that stage the native host also
+drops from 48,728 to 46,080 bytes.
+
+The nine-frame ICO was reduced to the five sizes used by normal Explorer and
+desktop layouts: 16, 24, 32, 48, and 64 pixels. The 20, 40, 128, and 256 pixel
+frames were removed; Windows scales the nearest available frame for uncommon
+DPI steps. The 256 pixel frame only served Explorer's extra-large view, which
+this project does not target. The ICO goes from 43,233 to 13,463 bytes
+(-29,770), and `.rsrc` from 46,072 to 16,096. A lossless recompression attempt
+only saved 402 bytes, so it was rejected.
+
+| Section/group | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `.text` | 256,624 | 256,624 | 0 |
+| read-only data (`.rdata`) | 23,768 | 23,768 | 0 |
+| unwind/SEH (`.pdata`+`.xdata`) | 15,088 | 15,088 | 0 |
+| resources (`.rsrc`) | 46,072 | 16,096 | -29,976 |
+| imports/dynamic tables | 8,808 | 8,808 | 0 |
+| relocations | 600 | 600 | 0 |
+| COFF symbol overlay | 9,399 | 0 | -9,399 |
+| headers/padding | 3,216 | 3,496 | +280 |
+| **Windows app file** | **367,287** | **328,192** | **-39,095 (-10.6%)** |
+
+The rebuilt baseline is 367,287 rather than the earlier 365,718 because the
+COFF symbol table includes build paths; `strip --strip-all` makes the result
+independent of them. Dropping the 256 pixel frame alone took the app from
+344,576 to 328,192 bytes. Before LTO, the no-UPX package was 695,296 bytes for
+the setup and 258,948 bytes for the ZIP, against 807,089 and 323,540 before the
+pass.
+
+### MinGW LTO ICE fix
+
+The MinGW GCC 15.2 linker ICE (`binds_to_current_def_p`) only occurs with the
+default parallel LTO partitioning. Linking with `-flto=1 -flto-partition=one`
+lets full LTO optimize the UI, including `selected_ids`, without excluding it.
+CMake now enables LTO by default on MinGW and appends those options to every
+LTO target. This is a compiler workaround, not a feature or safety change.
+
+| Section/group | Before LTO | After LTO | Change |
+| --- | ---: | ---: | ---: |
+| `.text` | 256,624 | 241,920 | -14,704 |
+| read-only data (`.rdata`) | 23,768 | 20,696 | -3,072 |
+| resources (`.rsrc`) | 16,096 | 16,096 | 0 |
+| unwind/SEH | 15,088 | 15,088 | 0 |
+| headers/padding | 3,496 | 3,376 | -120 |
+| **Windows app file** | **328,192** | **310,272** | **-17,920 (-5.5%)** |
+
+The native host is 19,456 bytes with this LTO build; the source-level path-join
+fix below accounts for its reduction. With that host, the no-UPX setup is
+650,752 bytes and the ZIP is 237,273.
+
+### Native host path join
+
+The Windows host built its sibling executable path with
+`swprintf(..., L"%ls\\pzmodmgr.exe", exe_dir)`. That one call pulled in
+MinGW's `__mingw_wpformat` (3,104 bytes), the gdtoa float-conversion chain
+(roughly 3.5 KB), and extra msvcrt imports such as `fwprintf`, `fputwc` and
+`localeconv`. Replacing it with `wcslen` and `memcpy` keeps the same path but
+drops the formatter and its conversion runtime.
+
+| Section/group | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `.text` | 34,928 | 10,464 | -24,464 |
+| `.rdata` | 2,696 | 1,672 | -1,024 |
+| unwind/SEH (`.pdata`+`.xdata`) | 2,048 | 948 | -1,100 |
+| imports/dynamic tables (`.idata`) | 2,420 | 2,068 | -352 |
+| other (`.data`, `.reloc`) | 224 | 168 | -56 |
+| headers/alignment | 3,748 | 4,120 | +372 |
+| **Windows native host file** | **46,080** | **19,456** | **-26,624 (-57.8%)** |
+
+The stripped host is 19,456 bytes both with and without LTO, so LTO adds no
+benefit here. Linux is 10,160 bytes; Windows is still about 1.9x larger because
+of PE headers and alignment, the import table, unwind metadata, and the
+`CreateProcessW`/wide-path code that replaces Linux's `popen` call.
+
+A custom `-nostartfiles` entry was also prototyped. With a `mainCRTStartup`
+that calls the renamed host main and `ExitProcess`, the host measured 9,728
+bytes (slightly below Linux). That removes `__tmainCRTStartup` (1,024),
+`_pei386_runtime_relocator` (912), `_gnu_exception_handler` (464),
+`__mingw_TLScallback` (272), and `__main` (32), along with their imports and
+unwind data. It handled a framed request under Wine, including the sibling
+`CreateProcessW` launch. It is not shipped: it skips CRT argv, TLS, `atexit`,
+and SEH setup, was only validated under Wine, and would break if the host later
+uses a CRT feature that expects that initialization. It needs a real Windows
+test before it can be considered.
+
+## LodePNG evaluation
+
+LodePNG was built alone with its encoder and disk support disabled, both as C++
+and as C99. It was tested against the nine unique real icon images in the
+project: the 16, 20, 24, 32, 40, 48, 64, 128, and 256 pixel ICO frames. The
+duplicated extension/assets copies were not counted. All are 8-bit RGBA,
+non-interlaced PNGs; no malformed PNG tests were added because upstream covers
+that surface.
+
+| Item | stb_image (PNG only) | LodePNG decoder-only |
+| --- | ---: | ---: |
+| Object, C99 build | 48,496 | 95,840 |
+| Object, C++ build | 48,496 | 100,584 |
+| Identical linked decoder | 198,992 | 223,568 (+24,576) |
+
+All nine decoded images matched byte-for-byte by RGBA hash. Peak RSS for the
+256px decode was 11,920 KB for both. LodePNG does not save binary size here, so
+stb_image remains.
+
 
 ## Non-std binary and memory work
 
 The final pass removed costs outside the container/runtime surface:
 
-- **LTO on Linux** replaces the previous non-LTO link and takes the stripped
-  binary from 243,976 to 215,192 bytes. It is enabled by default for Release
-  when the compiler supports it. MinGW GCC 15.2 has a reproducible LTO ICE in
-  `binds_to_current_def_p()` on this UI, so the default is automatically off for
-  MinGW; `PZMODMGR_LTO=ON` can be tried once that toolchain bug is fixed.
+- **LTO on Linux and MinGW** replaces the previous non-LTO links. On Linux the
+  stripped binary goes from 243,976 to 215,192 bytes; on MinGW the app goes from
+  328,192 to 310,272 after the single-partition ICE workaround. LTO is enabled
+  by default for Release when the compiler supports it.
 - **Only Xlib is linked on Linux.** The old `X11_LIBRARIES` line made SM, ICE,
   and Xext direct dependencies even though no symbol was used. The binary now
   has only `libX11`, `libm`, and `libc` as direct dependencies, so the loader no
@@ -112,7 +310,7 @@ libstdc++ goal. The codebase already relies on C99-era libc facilities.
 | `std::chrono` | Removed from app code | File timestamps, cache ages, sleeps | `time_t`, `clock_gettime`, `Sleep`/`usleep` |
 | `std::error_code` | Removed | Every filesystem failure path | `pz::error_code` with `strerror`/`FormatMessageA` |
 | `std::wstring` | 54 refs / 5 files | Windows UI and Win32 boundary | UTF-16 buffer/array; keep UTF-8 as the stored form |
-| `std::string_view`, `std::from_chars` | URL adapter, steamcmd, mod.info | C++17 parsing helpers | pointer + length and manual decimal parsing |
+| `std::string_view`, `std::from_chars` | steamcmd, mod.info | C++17 parsing helpers | pointer + length and manual decimal parsing |
 | C++ language features | `auto`, lambdas, templates, classes, overloads | C has no equivalents | explicit types, functions with context structs, manual dispatch |
 
 The application does not use iostreams, regular expressions, RTTI,
@@ -128,7 +326,7 @@ into abort paths instead of pulling in the C++ unwinder.
   containers, lambdas, threads, `std::wstring`, and callbacks.
 - Core orchestration: `mod_manager.cpp` (1,062), `updater.cpp` (736), and
   `steamcmd.cpp` (703) hold most of the string/vector/map/error-code surface.
-- Leaf code is already close to C in shape: `url.cpp`, `mod_info.cpp`,
+- Leaf code is already close to C in shape: `url.c`, `mod_info.cpp`,
   `paths.cpp`, `activation.cpp`, the SHA-256/JSON helpers, and `fs_posix.cpp`.
 - Third-party `stb_image.h`, Xlib, and Win32 are C APIs. They do not require a
   C++ runtime.
@@ -173,5 +371,6 @@ into abort paths instead of pulling in the C++ unwinder.
   actions blocking.
 - The Windows installer and uninstaller are separate C++ programs. They also
   need conversion before the whole distribution is libstdc++-free.
-- The native messaging host links `pzcore`; it inherits the same core migration
-  and must remain a console-subsystem program.
+- The native messaging host is C99 but now depends on the sibling `pzmodmgr`
+  executable being present and runnable. It must remain a console-subsystem
+  program, and its add/update behavior is covered by the native-host test.

@@ -1,8 +1,8 @@
 #include "core/mod_info.hpp"
 #include "core/text.hpp"
 #include <algorithm>
-#include <charconv>
 #include <cctype>
+#include <climits>
 #include <vector>
 
 namespace pz {
@@ -38,8 +38,12 @@ std::vector<std::string> parse_required_ids(const std::string& value) {
 int version_rank(const std::string& name) {
     if (name.empty()) return -1;
     int value = 0;
-    auto r = std::from_chars(name.data(), name.data() + name.size(), value);
-    if (r.ec != std::errc{} || r.ptr != name.data() + name.size()) return -1;
+    for (char c : name) {
+        if (c < '0' || c > '9') return -1;
+        const int digit = c - '0';
+        if (value > (INT_MAX - digit) / 10) return -1;
+        value = value * 10 + digit;
+    }
     return value;
 }
 
@@ -102,22 +106,33 @@ fs::path mod_info_dir(const fs::path& dir, const std::string& game_version = {})
 
     fs::directory_iterator it(dir, ec);
     if (ec) return {};
-    std::vector<std::pair<int, fs::path>> candidates;
+
+    // Version folders are few, so choose the best candidate in one pass rather
+    // than instantiating std::sort and its heap/insertion machinery.
+    fs::path best_any;
+    fs::path best_compatible;
+    int best_any_rank = -1, best_compatible_rank = -1;
+    std::string best_any_name, best_compatible_name;
     for (const auto& e : it) {
         if (!e.is_directory(ec)) continue;
         if (!fs::is_regular_file(e.path() / "mod.info", ec)) continue;
-        candidates.emplace_back(version_rank(e.path().filename().string()), e.path());
+        const std::string name = e.path().filename().string();
+        const int rank = version_rank(name);
+        if (rank > best_any_rank || (rank == best_any_rank && name > best_any_name)) {
+            best_any = e.path();
+            best_any_rank = rank;
+            best_any_name = name;
+        }
+        if (!info_supports_game(e.path(), game_version)) continue;
+        if (rank > best_compatible_rank ||
+            (rank == best_compatible_rank && name > best_compatible_name)) {
+            best_compatible = e.path();
+            best_compatible_rank = rank;
+            best_compatible_name = name;
+        }
     }
-    std::sort(candidates.begin(), candidates.end(),
-        [](const auto& a, const auto& b) {
-            if (a.first != b.first) return a.first > b.first;
-            return a.second.filename() > b.second.filename();
-        });
-    if (candidates.empty()) return {};
-
-    for (const auto& candidate : candidates)
-        if (info_supports_game(candidate.second, game_version)) return candidate.second;
-    return candidates.front().second;
+    if (!best_compatible.empty()) return best_compatible;
+    return best_any;
 }
 
 }  // namespace

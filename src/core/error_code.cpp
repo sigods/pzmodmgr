@@ -31,9 +31,7 @@ std::string error_code::message() const {
     const char* text = std::strerror(value_);
     if (text && *text) return text;
 #endif
-    char fallback[32];
-    std::snprintf(fallback, sizeof(fallback), "error %d", value_);
-    return fallback;
+    return "error " + std::to_string(value_);
 }
 
 }  // namespace pz

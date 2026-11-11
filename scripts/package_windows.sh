@@ -57,9 +57,11 @@ crlf "$ROOT/installer/README-Windows.txt" "$STAGE/README.txt"
 crlf "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
 rm -f "$STAGE/README.md" "$STAGE/LICENSE"
 
+# --strip-all also drops the COFF symbol table that --strip-unneeded leaves
+# after the last PE section as a path-dependent overlay.
 strip_tool=x86_64-w64-mingw32-strip
 if command -v "$strip_tool" >/dev/null 2>&1; then
-    "$strip_tool" --strip-unneeded "$STAGE/pzmodmgr.exe" "$STAGE/pzmodmgr_native_host.exe"
+    "$strip_tool" --strip-all "$STAGE/pzmodmgr.exe" "$STAGE/pzmodmgr_native_host.exe"
 fi
 
 # The distributed executables must not need MinGW runtime DLLs.
@@ -92,7 +94,7 @@ x86_64-w64-mingw32-windres -I "$ROOT/installer" \
     -o "$STAGE/uninstall.exe" \
     -lshell32 -lshlwapi -ladvapi32 -luser32
 if command -v "$strip_tool" >/dev/null 2>&1; then
-    "$strip_tool" --strip-unneeded "$STAGE/uninstall.exe"
+    "$strip_tool" --strip-all "$STAGE/uninstall.exe"
 fi
 
 # Refresh the portable zip with the uninstaller included.
@@ -138,7 +140,7 @@ x86_64-w64-mingw32-windres "$WORK/payload.rc" -O coff -o "$WORK/payload-res.o"
     -luser32 -lgdi32 -lmsimg32
 
 if command -v "$strip_tool" >/dev/null 2>&1; then
-    "$strip_tool" --strip-unneeded "$OUT/$NAME-setup.exe"
+    "$strip_tool" --strip-all "$OUT/$NAME-setup.exe"
 fi
 if objdump -p "$OUT/$NAME-setup.exe" | grep -Eq 'libstdc\+\+|libgcc|winpthread'; then
     echo "error: setup executable still depends on a MinGW runtime DLL" >&2

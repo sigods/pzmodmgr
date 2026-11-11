@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <utility>
 
 namespace pz {
 namespace {
@@ -125,6 +126,20 @@ std::string display_name(ActivationKind kind, const std::string& name) {
     return "Server: " + name;
 }
 
+// Save and server lists are small; a stable insertion sort avoids two
+// std::sort instantiations and their heap/insertion helper code.
+void sort_targets(std::vector<ActivationTarget>& targets) {
+    for (std::size_t i = 1; i < targets.size(); ++i) {
+        ActivationTarget value = std::move(targets[i]);
+        std::size_t j = i;
+        while (j > 0 && value.name < targets[j - 1].name) {
+            targets[j] = std::move(targets[j - 1]);
+            --j;
+        }
+        targets[j] = std::move(value);
+    }
+}
+
 }  // namespace
 
 std::vector<std::string> parse_block_mod_ids(const std::string& text) {
@@ -223,20 +238,21 @@ std::string rewrite_block_mod_ids(const std::string& text,
     if (open >= 0 && close > open) {
         std::vector<std::string> out;
         out.reserve(lines.size() + mod_ids.size());
-	out.insert(out.end(), lines.begin(), lines.begin() + mods_line);
-        out.insert(out.end(), block.begin(), block.end());
-        out.insert(out.end(), lines.begin() + close + 1, lines.end());
+        for (int i = 0; i < mods_line; ++i) out.push_back(std::move(lines[i]));
+        for (const auto& line : block) out.push_back(line);
+        for (std::size_t i = static_cast<std::size_t>(close + 1); i < lines.size(); ++i)
+            out.push_back(std::move(lines[i]));
         return join_lines(out, crlf);
     }
 
     if (lines.empty()) {
         std::vector<std::string> fresh{"version = 1,", ""};
-        fresh.insert(fresh.end(), block.begin(), block.end());
+        for (const auto& line : block) fresh.push_back(line);
         return join_lines(fresh, crlf);
     }
-    std::vector<std::string> out = lines;
+    std::vector<std::string> out = std::move(lines);
     if (!out.empty() && !trim(out.back()).empty()) out.push_back("");
-    out.insert(out.end(), block.begin(), block.end());
+    for (const auto& line : block) out.push_back(line);
     return join_lines(out, crlf);
 }
 
@@ -367,10 +383,8 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
             }
         }
     }
-    std::sort(saves.begin(), saves.end(), [](const ActivationTarget& a, const ActivationTarget& b) {
-        return a.name < b.name;
-    });
-    targets.insert(targets.end(), saves.begin(), saves.end());
+    sort_targets(saves);
+    for (auto& target : saves) targets.push_back(std::move(target));
 
     std::vector<ActivationTarget> servers;
     fs::directory_iterator ini_files(zomboid_dir / "Server", ec);
@@ -388,10 +402,8 @@ std::vector<ActivationTarget> discover_activation_targets(const fs::path& zomboi
             servers.push_back(std::move(target));
         }
     }
-    std::sort(servers.begin(), servers.end(), [](const ActivationTarget& a, const ActivationTarget& b) {
-        return a.name < b.name;
-    });
-    targets.insert(targets.end(), servers.begin(), servers.end());
+    sort_targets(servers);
+    for (auto& target : servers) targets.push_back(std::move(target));
     return targets;
 }
 

@@ -306,11 +306,7 @@ std::string sha256_hex(const std::string& data) {
 
     std::string result;
     result.reserve(64);
-    for (std::uint32_t value : h) {
-        char part[9]{};
-        std::snprintf(part, sizeof part, "%08x", value);
-        result += part;
-    }
+    for (std::uint32_t value : h) append_hex(result, value, 8);
     return result;
 }
 

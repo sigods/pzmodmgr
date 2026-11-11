@@ -39,6 +39,16 @@ void operator delete[](void* memory, const std::nothrow_t&) noexcept {
 // libstdc++ headers emit calls to these helpers for vector/string growth and
 // mutex failures. The application cannot recover from either condition, so
 // terminate without pulling eh_throw, the DWARF unwinder, or the demangler.
+#ifdef _WIN32
+// libstdc++'s default verbose terminate handler pulls in the full demangler
+// (about 49 KB in the static MinGW runtime) just to print a type name. This
+// application has exceptions disabled and cannot recover from termination, so
+// abort without the demangler.
+namespace __gnu_cxx {
+void __verbose_terminate_handler() { std::abort(); }
+}  // namespace __gnu_cxx
+#endif
+
 namespace std {
 
 void __throw_bad_alloc() { std::abort(); }
