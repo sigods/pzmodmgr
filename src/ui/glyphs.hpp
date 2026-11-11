@@ -132,6 +132,25 @@ constexpr Glyph kClear{{
     "................",
 }};
 
+constexpr Glyph kLock{{
+    "................",
+    ".....######.....",
+    "....##....##....",
+    "....##....##....",
+    "....##....##....",
+    "...##########...",
+    "...##########...",
+    "...###.##.###...",
+    "...###.##.###...",
+    "...##########...",
+    "...##########...",
+    "...##########...",
+    "................",
+    "................",
+    "................",
+    "................",
+}};
+
 constexpr Glyph kFilter{{
     "................",
     ".##############.",
@@ -201,6 +220,7 @@ static_assert(valid(kUpdateAll), "update-all glyph must be 16x16");
 static_assert(valid(kRemove), "remove glyph must be 16x16");
 static_assert(valid(kSelectAll), "select-all glyph must be 16x16");
 static_assert(valid(kClear), "clear glyph must be 16x16");
+static_assert(valid(kLock), "lock glyph must be 16x16");
 static_assert(valid(kFilter), "filter glyph must be 16x16");
 static_assert(valid(kSort), "sort glyph must be 16x16");
 static_assert(valid(kSave), "save glyph must be 16x16");

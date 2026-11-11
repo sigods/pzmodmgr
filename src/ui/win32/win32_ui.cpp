@@ -141,6 +141,7 @@ std::vector<std::string> g_row_folders;
 std::vector<std::string> g_row_icon_paths;
 std::vector<std::uint64_t> g_row_ids;
 std::vector<char> g_row_updates;
+std::vector<char> g_row_locked;
 std::vector<std::uint64_t> g_selected_ids;
 std::vector<std::string> g_selected_folders;
 bool g_only_updates = false;
@@ -926,6 +927,7 @@ void refresh_list() {
     g_row_meta.clear();
     g_row_folders.clear();
     g_row_updates.clear();
+    g_row_locked.clear();
     g_row_icon_paths.clear();
     g_row_mod_ids.clear();
     g_row_enabled.clear();
@@ -959,6 +961,7 @@ void refresh_list() {
         g_row_icon_paths.push_back(info && !info->icon.empty() ? info->icon.string()
                                                               : std::string{});
         g_row_updates.push_back(g_mm->update_available(m.workshop_id) ? 1 : 0);
+        g_row_locked.push_back(m.locked ? 1 : 0);
         LRESULT added = SendMessageW(g_list, LB_ADDSTRING, 0,
                                      (LPARAM)g_row_names.back().c_str());
         if (added >= 0) g_row_ids.push_back(m.workshop_id);
@@ -1403,6 +1406,7 @@ void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color) {
     case ID_REMOVE: glyph = &glyphs::kRemove; break;
     case ID_SELECT_ALL: glyph = &glyphs::kSelectAll; break;
     case ID_CLEAR: glyph = &glyphs::kClear; break;
+    case ID_LOCK: glyph = &glyphs::kLock; break;
     case ID_FILTER_ALL:
     case ID_FILTER_UPDATES: glyph = &glyphs::kFilter; break;
     case ID_SORT: glyph = &glyphs::kSort; break;
@@ -1464,7 +1468,7 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     SIZE size{};
     GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
     const bool show_icon = id != ID_SETTINGS && id != ID_CHECK &&
-                           id != ID_SELF_UPDATE && id != ID_LOCK;
+                           id != ID_SELF_UPDATE;
     const int icon_w = show_icon ? 18 : 0;
     const int gap = show_icon ? 7 : 0;
     const int start = r.left + (r.right - r.left - icon_w - gap - size.cx) / 2;
@@ -1488,6 +1492,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     FrameRect(dis->hDC, &card, selected ? g_accent_brush : g_border_brush);
 
     const bool has_update = index < g_row_updates.size() && g_row_updates[index] != 0;
+    const bool is_locked = index < g_row_locked.size() && g_row_locked[index] != 0;
     const bool switchable = !g_activation.empty();
     const bool is_enabled = index < g_row_enabled.size() && g_row_enabled[index] != 0;
     RECT icon_rc{card.left + 10, card.top + 8, card.left + 58, card.top + 56};
@@ -1554,11 +1559,12 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
 
     if (has_update) {
         RECT pill{update_left, card.top + 22, update_left + pill_w, card.top + 42};
-        HBRUSH orange = CreateSolidBrush(g_theme.accent);
-        FillRect(dis->hDC, &pill, orange);
-        DeleteObject(orange);
-        SetTextColor(dis->hDC, g_theme.on_accent);
-        DrawTextW(dis->hDC, L"UPDATE", -1, &pill,
+        HBRUSH fill = CreateSolidBrush(is_locked ? g_theme.surface : g_theme.accent);
+        FillRect(dis->hDC, &pill, fill);
+        DeleteObject(fill);
+        if (is_locked) FrameRect(dis->hDC, &pill, g_border_strong_brush);
+        SetTextColor(dis->hDC, is_locked ? g_theme.muted : g_theme.on_accent);
+        DrawTextW(dis->hDC, is_locked ? L"LOCKED" : L"UPDATE", -1, &pill,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
@@ -2650,6 +2656,7 @@ int run_ui(ModManager& mm) {
     g_row_meta.clear();
     g_row_folders.clear();
     g_row_updates.clear();
+    g_row_locked.clear();
     g_row_icon_paths.clear();
     g_row_mod_ids.clear();
     g_row_enabled.clear();
