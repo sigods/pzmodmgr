@@ -751,7 +751,6 @@ int run_ui(ModManager& mm) {
         const std::string label = button_label(b);
         const bool show_icon = b != Btn::Settings && b != Btn::Check &&
                                b != Btn::Theme && b != Btn::Enable &&
-                               b != Btn::Lock &&
                                b != Btn::ShareServer && b != Btn::SelfUpdate &&
                                b != Btn::EnableTarget && b != Btn::DisableTarget &&
                                b != Btn::CloseTargets &&
