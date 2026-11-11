@@ -44,11 +44,14 @@ plain Mod IDs on both builds; B42's leading backslash is only for a server
 INI's `Mods=` line. Multi-folder Workshop items enable only the newest
 game-compatible variant. Manual mods that are not
 in `installed.tsv` are listed too and can be enabled or disabled by folder.
-Items enabled in a server INI are treated as version-locked: update checks still
-report newer versions, but `Update` and `Update all` skip them. The `Lock` /
-`Unlock` action pins any selected item outside a server too; the lock is stored
-as the sixth `installed.tsv` column and survives restarts. Removing a server's
-`Mods=` entry releases the automatic lock. `Share server` copies the server's
+Each target has a `Lock updates` switch, off by default, including
+`mods/default.txt`, saves, and server INIs. When it is on, items enabled in that
+target are pinned: they are not checked for updates, are removed from
+`updates.tsv`, and `Update` / `Update all` skip them. The `Lock` / `Unlock`
+action stores a separate manual lock as the sixth `installed.tsv` column and
+survives restarts. Turning the target switch off releases its automatic lock;
+removing a server's `Mods=` entry also stops it from applying. `Share server`
+copies the server's
 enabled Workshop IDs as a space-separated list that can be pasted into `Add` on
 another instance. To pin those same items there, run `pzmodmgr lock <ids>` or
 prefix the pasted list with `lock`; installed folder or mod names are accepted
@@ -130,7 +133,7 @@ Linux distribution (single self-extracting `.sh` with a `.desktop` entry):
 
 ```bash
 ./scripts/package_linux.sh
-./dist/PZModManager-0.2.10-linux-x86_64.sh
+./dist/PZModManager-0.2.11-linux-x86_64.sh
 ```
 
 GCC/Clang Release builds (Linux and the MinGW Windows build) default to size

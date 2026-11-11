@@ -29,6 +29,7 @@ constexpr int ID_LOCK = 121;
 constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_THEME = 203, ID_SET_AUTO = 204;
 constexpr int ID_TGT_LIST = 301, ID_TGT_ENABLE = 302, ID_TGT_DISABLE = 303;
 constexpr int ID_TGT_COPY = 304, ID_TGT_CLOSE = 305, ID_TGT_COPY_NAMES = 306;
+constexpr int ID_TGT_LOCK = 307;
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_DONE = WM_APP + 2;
 constexpr UINT WM_APP_RELOAD = WM_APP + 3;
@@ -107,6 +108,7 @@ HWND g_targets_wnd = nullptr;
 HWND g_tgt_list = nullptr;
 HWND g_tgt_status = nullptr;
 HWND g_tgt_copy = nullptr;
+HWND g_tgt_lock = nullptr;
 HWND g_tgt_copy_names = nullptr;
 std::vector<ActivationTarget> g_targets;
 std::vector<std::vector<std::string>> g_row_mod_ids;
@@ -1493,6 +1495,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
 
     const bool has_update = index < g_row_updates.size() && g_row_updates[index] != 0;
     const bool is_locked = index < g_row_locked.size() && g_row_locked[index] != 0;
+    const bool show_badge = has_update || is_locked;
     const bool switchable = !g_activation.empty();
     const bool is_enabled = index < g_row_enabled.size() && g_row_enabled[index] != 0;
     RECT icon_rc{card.left + 10, card.top + 8, card.left + 58, card.top + 56};
@@ -1534,7 +1537,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
     constexpr int pill_w = 64, pill_gap = 6, pill_margin = 12;
     const int on_left = card.right - pill_margin - pill_w;
     const int update_left = switchable ? on_left - pill_gap - pill_w : on_left;
-    const int text_right = (has_update ? update_left
+    const int text_right = (show_badge ? update_left
                                        : switchable ? on_left
                                                     : card.right - pill_margin) - 8;
     RECT name_rc{card.left + 72, card.top + 7, text_right, card.top + 34};
@@ -1557,7 +1560,7 @@ void draw_list_item(const DRAWITEMSTRUCT* dis) {
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
-    if (has_update) {
+    if (show_badge) {
         RECT pill{update_left, card.top + 22, update_left + pill_w, card.top + 42};
         HBRUSH fill = CreateSolidBrush(is_locked ? g_theme.surface : g_theme.accent);
         FillRect(dis->hDC, &pill, fill);
@@ -1955,6 +1958,16 @@ void update_target_copy_label() {
     SetWindowTextW(g_tgt_copy, server ? L"Copy server IDs" : L"Copy IDs");
 }
 
+void sync_target_lock() {
+    if (!g_tgt_lock) return;
+    const int sel = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
+    const bool valid = sel >= 0 && sel < (int)g_targets.size();
+    SendMessageW(g_tgt_lock, BM_SETCHECK,
+                 valid && g_targets[(std::size_t)sel].lock_updates
+                     ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(g_tgt_lock, valid);
+}
+
 void fill_target_list() {
     SendMessageW(g_tgt_list, LB_RESETCONTENT, 0, 0);
     const int keep = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
@@ -1984,6 +1997,7 @@ void fill_target_list() {
         SetWindowTextW(g_tgt_status, to_w(text).c_str());
     }
     update_target_copy_label();
+    sync_target_lock();
     sync_bars();
     if (g_targets_wnd) {
         const int selection = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
@@ -2027,6 +2041,10 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | SS_NOPREFIX, kTgtListX, kTgtStatusY,
                 kTgtListW, 32, hwnd, nullptr, nullptr, nullptr);
             set_font(g_tgt_status, g_font_small);
+            g_tgt_lock = CreateWindowW(L"BUTTON", L"Lock updates for this target",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                kTgtListX, 78, 330, 20, hwnd, (HMENU)ID_TGT_LOCK, nullptr, nullptr);
+            set_font(g_tgt_lock, g_font_body);
 
             struct DialogButton {
                 const wchar_t* label;
@@ -2131,6 +2149,22 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (sel < 0 || sel >= (int)g_targets.size()) return 0;
         if (id == ID_TGT_LIST && HIWORD(wp) == LBN_SELCHANGE) {
             update_target_copy_label();
+            sync_target_lock();
+            return 0;
+        }
+        if (id == ID_TGT_LOCK && HIWORD(wp) == BN_CLICKED) {
+            const bool lock_value =
+                SendMessageW(g_tgt_lock, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            const std::string line = "target-lock " + std::to_string(sel) +
+                                     (lock_value ? " on" : " off");
+            auto log = [](const std::string& s) { append_log(s); };
+            auto result = run_command(*g_mm, line, log);
+            append_log(std::string(result.ok ? "OK: " : "ERROR: ") + result.message);
+            if (result.ok) {
+                g_targets = g_mm->activation_targets();
+                fill_target_list();
+                refresh_list();
+            }
             return 0;
         }
         if (id == ID_TGT_ENABLE || id == ID_TGT_DISABLE) {
@@ -2188,6 +2222,7 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_targets_wnd = nullptr;
         g_tgt_list = nullptr;
         g_tgt_status = nullptr;
+        g_tgt_lock = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);

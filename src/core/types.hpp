@@ -2,6 +2,7 @@
 #include "core/fs_native.hpp"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace pz {
 namespace fs = native_fs;
@@ -42,6 +43,9 @@ struct Config {
     std::string steam_user;       // account that owns PZ; password is cached by steamcmd
     bool dark_mode = false;       // UI theme preference
     bool auto_enable = false;     // add newly installed mods to mods/default.txt
+    // Activation targets whose enabled mods are update-locked. Keys are
+    // "default", "save:<name>", or "server:<name>".
+    std::vector<std::string> locked_targets;
     fs::path zomboid_dir;         // ~/Zomboid or %USERPROFILE%\Zomboid (GOG == Steam)
     fs::path user_mods_dir;       // zomboid_dir/mods
     fs::path data_dir;            // zomboid_dir/pzmodmgr  (state, cache, temporary swap copy)

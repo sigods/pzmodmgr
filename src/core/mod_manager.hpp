@@ -73,7 +73,7 @@ public:
     bool update_available(std::uint64_t workshop_id) const;
     // True when the item was explicitly locked by the user.
     bool manually_locked(std::uint64_t workshop_id) const;
-    // True when the item is enabled in any discovered server target.
+    // True when the item is enabled in any target whose updates are locked.
     bool server_locked(std::uint64_t workshop_id) const;
     std::vector<std::uint64_t> server_locked_ids() const;
     // True when updates must be skipped: either lock above applies.
@@ -82,6 +82,10 @@ public:
     // Persists a manual lock for every folder of each installed Workshop item.
     Result set_locked(const std::vector<std::uint64_t>& workshop_ids, bool locked,
                       const LogFn& log);
+    // Persists whether enabled mods in one Default, save, or server target
+    // should have updates locked.
+    Result set_target_locked(ActivationKind kind, const std::string& name,
+                             bool lock_value, const LogFn& log);
     bool app_update_available() const { return app_update_available_; }
     // True when either an installed mod or the app release is due for a check.
     bool update_check_due() const;

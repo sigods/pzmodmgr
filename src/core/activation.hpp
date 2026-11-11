@@ -20,7 +20,14 @@ struct ActivationTarget {
     std::vector<std::uint64_t> workshop_ids; // server WorkshopItems= values
     bool backslash = false;                  // server INI writes \ModID; blocks always plain
     bool exists = false;
+    bool lock_updates = false;               // enabled mods in this target are pinned
 };
+
+inline std::string activation_target_key(const ActivationTarget& target) {
+    if (target.kind == ActivationKind::Default) return "default";
+    if (target.kind == ActivationKind::Save) return "save:" + target.name;
+    return "server:" + target.name;
+}
 
 // Discovers mods/default.txt, every Saves/<mode>/<save> directory, and every
 // Server/*.ini. Server INIs use B42's backslash form; block files do not.

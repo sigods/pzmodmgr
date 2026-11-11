@@ -1007,6 +1007,26 @@ int run_ui(ModManager& mm) {
         fill(dpy, win, gc, kSettingsX, kSettingsY, kSettingsW, kSettingsH, pal.surface);
         frame(dpy, win, gc, kSettingsX, kSettingsY, kSettingsW, kSettingsH, pal.border);
 
+        const bool has_target = target_focus >= 0 &&
+                                target_focus < static_cast<int>(activation.size());
+        const Rect lock_box{kSettingsFieldX, kSettingsY + 68, 18, 18};
+        fill(dpy, win, gc, lock_box.x, lock_box.y, lock_box.w, lock_box.h,
+             has_target && activation[static_cast<std::size_t>(target_focus)].lock_updates
+                 ? pal.accent : pal.bg);
+        frame(dpy, win, gc, lock_box.x, lock_box.y, lock_box.w, lock_box.h,
+              has_target ? pal.border_strong : pal.border);
+        if (has_target && activation[static_cast<std::size_t>(target_focus)].lock_updates) {
+            XSetForeground(dpy, gc, pal.on_accent);
+            XSetLineAttributes(dpy, gc, 2, LineSolid, CapRound, JoinRound);
+            XDrawLine(dpy, win, gc, lock_box.x + 4, lock_box.y + 9,
+                      lock_box.x + 7, lock_box.y + 12);
+            XDrawLine(dpy, win, gc, lock_box.x + 7, lock_box.y + 12,
+                      lock_box.x + 14, lock_box.y + 4);
+            XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
+        }
+        text(dpy, win, gc, body, lock_box.x + 26, kSettingsY + 82,
+             "Lock updates for this target", has_target ? pal.text : pal.muted);
+
         if (activation.empty()) {
             text(dpy, win, gc, body, kSettingsFieldX, kSettingsY + 120,
                  "No Mods list, save, or server was found in the Zomboid folder.",
@@ -1183,6 +1203,8 @@ int run_ui(ModManager& mm) {
                 }
 
                 const bool has_update = mm.update_available(m.workshop_id);
+                const bool is_locked = m.locked;
+                const bool show_badge = has_update || is_locked;
                 const bool switchable = !activation.empty();
                 const bool is_enabled = index < static_cast<int>(row_enabled.size()) &&
                                         row_enabled[static_cast<std::size_t>(index)] != 0;
@@ -1192,9 +1214,9 @@ int run_ui(ModManager& mm) {
                 const int on_x = card.x + card.w - pill_margin - pill_w;
                 const int update_x = switchable ? on_x - pill_gap - pill_w : on_x;
                 const int text_x = card.x + 72;
-                const int text_right = (has_update ? update_x
-                                                  : switchable ? on_x
-                                                               : card.x + card.w - pill_margin) - 8;
+                const int text_right = (show_badge ? update_x
+                                                   : switchable ? on_x
+                                                                : card.x + card.w - pill_margin) - 8;
                 const int text_w = text_right - text_x;
                 text(dpy, win, gc, heading, text_x, card.y + 26,
                      elide(heading, m.name.empty() ? m.folders.front() : m.name, text_w),
@@ -1216,10 +1238,10 @@ int run_ui(ModManager& mm) {
                          pill.y + 14, label,
                          is_enabled ? pal.on_accent : pal.muted);
                 }
-                if (has_update) {
+                if (show_badge) {
                     const Rect pill{update_x, card.y + 22, pill_w, 20};
-                    const char* label = m.locked ? "LOCKED" : "UPDATE";
-                    if (m.locked) {
+                    const char* label = is_locked ? "LOCKED" : "UPDATE";
+                    if (is_locked) {
                         fill(dpy, win, gc, pill.x, pill.y, pill.w, pill.h, pal.bg);
                         frame(dpy, win, gc, pill.x, pill.y, pill.w, pill.h, pal.border_strong);
                     } else {
@@ -1227,7 +1249,7 @@ int run_ui(ModManager& mm) {
                     }
                     text(dpy, win, gc, body,
                          pill.x + (pill.w - text_width(body, label)) / 2,
-                         pill.y + 14, label, m.locked ? pal.muted : pal.on_accent);
+                         pill.y + 14, label, is_locked ? pal.muted : pal.on_accent);
                 }
             }
 
@@ -1710,6 +1732,23 @@ int run_ui(ModManager& mm) {
                         break;
                     }
                     if (ev.xbutton.button != Button1) break;
+                    if (in_rect(x, y, kSettingsFieldX, kSettingsY + 64, 280, 26) &&
+                        target_focus >= 0 &&
+                        target_focus < static_cast<int>(activation.size())) {
+                        const auto& target = activation[static_cast<std::size_t>(target_focus)];
+                        const std::string line = "target-lock " +
+                            std::to_string(target_focus) +
+                            (target.lock_updates ? " off" : " on");
+                        auto result = run_command(mm, line, [](const std::string&) {});
+                        push(std::string(result.ok ? "OK: " : "ERROR: ") + result.message);
+                        const int keep = target_focus;
+                        activation = mm.activation_targets();
+                        target_focus = activation.empty() ? -1 :
+                            std::min(keep, static_cast<int>(activation.size()) - 1);
+                        list_dirty = true;
+                        redraw();
+                        break;
+                    }
                     const Btn b = button_at(x, y);
                     if (b == Btn::CloseTargets) {
                         targets_open = false;
