@@ -10,6 +10,7 @@
 #endif
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -25,7 +26,8 @@ constexpr int ID_SELECT_ALL = 109, ID_CLEAR = 110;
 constexpr int ID_FILTER = 111, ID_FILTER_MODE = 112;
 constexpr int ID_SORT = 114, ID_CHECK = 115, ID_COPY = 116, ID_ENABLE = 117;
 constexpr int ID_SHARE_SERVER = 118, ID_SELF_UPDATE = 119, ID_FILTER_CLEAR = 120;
-constexpr int ID_LOCK = 121, ID_IMPORT = 122;
+constexpr int ID_LOCK = 121, ID_IMPORT = 122, ID_INPUT_CLEAR = 123;
+constexpr int ID_OPEN_MODS = 124;
 constexpr int ID_SET_SAVE = 201, ID_SET_CANCEL = 202, ID_SET_THEME = 203, ID_SET_AUTO = 204;
 constexpr int ID_TGT_LIST = 301, ID_TGT_ENABLE = 302, ID_TGT_DISABLE = 303;
 constexpr int ID_TGT_COPY = 304, ID_TGT_CLOSE = 305, ID_TGT_COPY_NAMES = 306;
@@ -69,8 +71,10 @@ HWND g_subtitle = nullptr;
 HWND g_brand_mark = nullptr;
 HWND g_brand_line = nullptr;
 HWND g_input = nullptr;
+HWND g_input_clear = nullptr;
 HWND g_add = nullptr;
 HWND g_import = nullptr;
+HWND g_open_mods = nullptr;
 HWND g_filter = nullptr;
 HWND g_filter_clear = nullptr;
 HWND g_filter_combo = nullptr;
@@ -404,6 +408,8 @@ void draw_filter_clear(const DRAWITEMSTRUCT* dis) {
     SelectObject(dis->hDC, old);
 }
 
+void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color);
+
 void draw_dialog_button(const DRAWITEMSTRUCT* dis, bool primary) {
     if (!dis) return;
     const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
@@ -433,8 +439,14 @@ void draw_dialog_button(const DRAWITEMSTRUCT* dis, bool primary) {
     SetBkMode(dis->hDC, TRANSPARENT);
     SetTextColor(dis->hDC, text);
     HGDIOBJ old = SelectObject(dis->hDC, g_font_body);
-    DrawTextW(dis->hDC, label, -1, &r,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SIZE size{};
+    GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
+    constexpr int icon_w = 18, gap = 7;
+    const int start = r.left + (r.right - r.left - icon_w - gap - size.cx) / 2;
+    draw_button_icon(dis->hDC, (int)dis->CtlID, start, (r.top + r.bottom) / 2, text);
+    RECT text_rc{start + icon_w + gap, r.top, r.right - 4, r.bottom};
+    DrawTextW(dis->hDC, label, -1, &text_rc,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dis->hDC, old);
 }
 
@@ -751,6 +763,14 @@ void update_filter_clear() {
     InvalidateRect(g_filter_clear, nullptr, TRUE);
 }
 
+void update_input_clear() {
+    if (!g_input || !g_input_clear) return;
+    const bool has_text = GetWindowTextLengthW(g_input) > 0;
+    ShowWindow(g_input_clear, has_text ? SW_SHOW : SW_HIDE);
+    EnableWindow(g_input_clear, has_text && !g_busy);
+    InvalidateRect(g_input_clear, nullptr, TRUE);
+}
+
 void refresh_filter_combo() {
     if (!g_filter_combo) return;
     if (!mod_filter_available(g_filter_mode, g_filter_counts))
@@ -781,6 +801,7 @@ void update_actions() {
     EnableWindow(g_import, !g_busy);
     EnableWindow(g_update_all, !g_busy);
     EnableWindow(g_settings_btn, !g_busy);
+    ShowWindow(g_self_update, g_app_update_available ? SW_SHOW : SW_HIDE);
     EnableWindow(g_self_update, !g_busy && g_app_update_available);
     EnableWindow(g_share_server_btn, !g_busy);
     EnableWindow(g_select_all, !g_busy && !g_row_ids.empty());
@@ -799,6 +820,7 @@ void update_actions() {
     EnableWindow(g_filter, !g_busy);
     EnableWindow(g_filter_combo, !g_busy);
     update_filter_clear();
+    update_input_clear();
     EnableWindow(g_sort, !g_busy);
     EnableWindow(g_check, !g_busy);
 }
@@ -1371,6 +1393,7 @@ void add_input() {
         return;
     }
     SetWindowTextW(g_input, L"");
+    update_input_clear();
     const bool lock_command = id.compare(0, 5, "lock ") == 0 ||
                               id.compare(0, 7, "unlock ") == 0;
     start_command(lock_command ? id : "add " + id);
@@ -1430,19 +1453,45 @@ void remove_selected() {
     start_command(cmd);
 }
 
+void open_mods_folder(HWND owner) {
+    const std::wstring path = to_w(g_mm->config().user_mods_dir.string());
+    const HINSTANCE result = ShellExecuteW(owner, L"open", path.c_str(), nullptr,
+                                           nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        const std::wstring message = L"Could not open the mods folder:\n" + path;
+        MessageBoxW(owner, message.c_str(), L"Mods folder", MB_OK | MB_ICONERROR);
+    }
+}
+
 void draw_button_icon(HDC hdc, int id, int x, int cy, COLORREF color) {
     const glyphs::Glyph* glyph = nullptr;
     switch (id) {
     case ID_ADD: glyph = &glyphs::kInstall; break;
-    case ID_UPDATE: glyph = &glyphs::kUpdate; break;
+    case ID_IMPORT:
+    case ID_OPEN_MODS: glyph = &glyphs::kFolder; break;
+    case ID_UPDATE:
+    case ID_SELF_UPDATE: glyph = &glyphs::kUpdate; break;
     case ID_UPDATE_ALL: glyph = &glyphs::kUpdateAll; break;
     case ID_REMOVE: glyph = &glyphs::kRemove; break;
     case ID_SELECT_ALL: glyph = &glyphs::kSelectAll; break;
-    case ID_CLEAR: glyph = &glyphs::kClear; break;
+    case ID_CLEAR:
+    case ID_SET_CANCEL:
+    case ID_TGT_DISABLE:
+    case ID_TGT_CLOSE: glyph = &glyphs::kClear; break;
+    case ID_COPY:
+    case ID_TGT_COPY:
+    case ID_TGT_COPY_NAMES: glyph = &glyphs::kCopy; break;
     case ID_LOCK: glyph = &glyphs::kLock; break;
     case ID_FILTER_MODE: glyph = &glyphs::kFilter; break;
     case ID_SORT: glyph = &glyphs::kSort; break;
-    default: return;   // Check intentionally has no glyph.
+    case ID_SETTINGS: glyph = &glyphs::kSettings; break;
+    case ID_SET_SAVE: glyph = &glyphs::kSave; break;
+    case ID_SET_THEME: glyph = &glyphs::kTheme; break;
+    case ID_CHECK:
+    case ID_ENABLE:
+    case ID_TGT_ENABLE: glyph = &glyphs::kCheck; break;
+    case ID_SHARE_SERVER: glyph = &glyphs::kServer; break;
+    default: return;
     }
 
     HBRUSH brush = CreateSolidBrush(color);
@@ -1492,13 +1541,9 @@ void draw_flat_button(const DRAWITEMSTRUCT* dis, int id, bool primary) {
     HGDIOBJ old = SelectObject(dis->hDC, g_font_body);
     SIZE size{};
     GetTextExtentPoint32W(dis->hDC, label, lstrlenW(label), &size);
-    const bool show_icon = id != ID_IMPORT && id != ID_SETTINGS && id != ID_CHECK &&
-                           id != ID_SELF_UPDATE;
-    const int icon_w = show_icon ? 18 : 0;
-    const int gap = show_icon ? 7 : 0;
+    constexpr int icon_w = 18, gap = 7;
     const int start = r.left + (r.right - r.left - icon_w - gap - size.cx) / 2;
-    if (show_icon)
-        draw_button_icon(dis->hDC, id, start, (r.top + r.bottom) / 2, icon_color);
+    draw_button_icon(dis->hDC, id, start, (r.top + r.bottom) / 2, icon_color);
     RECT text_rc{start + icon_w + gap, r.top, r.right - 4, r.bottom};
     DrawTextW(dis->hDC, label, -1, &text_rc,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -2394,12 +2439,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 800, 24, 96, 30, hwnd,
                 (HMENU)ID_SETTINGS, nullptr, nullptr);
             set_font(g_settings_btn, g_font_body);
+            g_open_mods = CreateWindowW(L"BUTTON", L"Mods folder",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 320, 24, 110, 30, hwnd,
+                (HMENU)ID_OPEN_MODS, nullptr, nullptr);
+            set_font(g_open_mods, g_font_body);
 
             g_input = CreateWindowW(L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 24, 84, 520, 38,
                 hwnd, (HMENU)ID_INPUT, nullptr, nullptr);
             set_font(g_input, g_font_body);
             set_edit_placeholder(g_input, L"Paste Workshop URLs or IDs");
+            SendMessageW(g_input, EM_SETMARGINS, EC_RIGHTMARGIN,
+                         MAKELPARAM(0, 26));
+            g_input_clear = CreateWindowW(L"BUTTON", L"X",
+                WS_CHILD | BS_OWNERDRAW, 522, 86, 20, 34, hwnd,
+                (HMENU)ID_INPUT_CLEAR, nullptr, nullptr);
+            set_font(g_input_clear, g_font_small);
             g_add = CreateWindowW(L"BUTTON", L"Install",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 560, 84, 212, 38, hwnd,
                 (HMENU)ID_ADD, nullptr, nullptr);
@@ -2432,6 +2487,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
                 312, 158, 170, 200, hwnd, (HMENU)ID_FILTER_MODE, nullptr, nullptr);
             set_font(g_filter_combo, g_font_small);
+            // A dropdown list sizes its closed field from the item height. Set
+            // the field explicitly so it matches the 24px filter controls.
+            SendMessageW(g_filter_combo, CB_SETITEMHEIGHT, (WPARAM)-1, 24);
             g_check = CreateWindowW(L"BUTTON", L"Check updates",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 492, 158, 120, 24, hwnd,
                 (HMENU)ID_CHECK, nullptr, nullptr);
@@ -2601,7 +2659,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             draw_list_item(dis);
             return TRUE;
         }
-        if (wp == ID_FILTER_CLEAR) {
+        if (wp == ID_FILTER_CLEAR || wp == ID_INPUT_CLEAR) {
             draw_filter_clear(dis);
             return TRUE;
         }
@@ -2613,7 +2671,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             wp == ID_UPDATE_ALL || wp == ID_SELECT_ALL || wp == ID_CLEAR ||
             wp == ID_LOCK || wp == ID_COPY || wp == ID_SETTINGS || wp == ID_ENABLE ||
             wp == ID_IMPORT || wp == ID_SHARE_SERVER || wp == ID_SORT ||
-            wp == ID_CHECK || wp == ID_SELF_UPDATE) {
+            wp == ID_CHECK || wp == ID_SELF_UPDATE || wp == ID_OPEN_MODS) {
             draw_flat_button(dis, (int)wp, wp == ID_ADD);
             return TRUE;
         }
@@ -2630,10 +2688,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!pasted.empty()) {
                 cmd += " " + pasted;
                 SetWindowTextW(g_input, L"");
+                update_input_clear();
             }
             start_command(cmd);
             return 0;
         }
+        case ID_OPEN_MODS:
+            open_mods_folder(hwnd);
+            return 0;
         case ID_UPDATE:
             update_selected();
             return 0;
@@ -2665,7 +2727,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             copy_selected_ids();
             return 0;
         case ID_INPUT:
-            if (HIWORD(wp) == EN_CHANGE) InvalidateRect(g_input, nullptr, TRUE);
+            if (HIWORD(wp) == EN_CHANGE) {
+                InvalidateRect(g_input, nullptr, TRUE);
+                update_input_clear();
+            }
+            return 0;
+        case ID_INPUT_CLEAR:
+            SetWindowTextW(g_input, L"");
+            update_input_clear();
+            SetFocus(g_input);
             return 0;
         case ID_FILTER:
             if (HIWORD(wp) == EN_CHANGE) {
@@ -2838,6 +2908,11 @@ int run_ui(ModManager& mm) {
             refresh_list();
             continue;
         }
+        if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE && GetFocus() == g_input) {
+            SetWindowTextW(g_input, L"");
+            update_input_clear();
+            continue;
+        }
         if (!IsDialogMessageW(w, &m)) {
             TranslateMessage(&m);
             DispatchMessageW(&m);
@@ -2849,10 +2924,11 @@ int run_ui(ModManager& mm) {
     clear_target_icons();
     g_edit_placeholders.clear();
     g_settings_wnd = nullptr;
-    for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input, g_add,
-                   g_list, g_empty, g_log, g_update, g_remove, g_update_all, g_settings_btn,
-                   g_self_update, g_filter_clear, g_select_all, g_clear, g_copy, g_details,
-                   g_status, g_count, g_activity_label}) {
+    for (HWND b : {g_brand_mark, g_brand_line, g_title, g_subtitle, g_input,
+                   g_input_clear, g_add, g_open_mods, g_list, g_empty, g_log, g_update,
+                   g_remove, g_update_all, g_settings_btn, g_self_update, g_filter_clear,
+                   g_select_all, g_clear, g_copy, g_details, g_status, g_count,
+                   g_activity_label}) {
         (void)b;
     }
     destroy_theme_brushes();

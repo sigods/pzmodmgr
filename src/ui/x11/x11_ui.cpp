@@ -208,17 +208,30 @@ void draw_button_icon(Display* d, Window w, GC gc, Btn b, int x, int cy,
     const glyphs::Glyph* glyph = nullptr;
     switch (b) {
     case Btn::Install: glyph = &glyphs::kInstall; break;
+    case Btn::Import: glyph = &glyphs::kFolder; break;
     case Btn::Save: glyph = &glyphs::kSave; break;
     case Btn::Update: glyph = &glyphs::kUpdate; break;
     case Btn::UpdateAll: glyph = &glyphs::kUpdateAll; break;
     case Btn::Remove: glyph = &glyphs::kRemove; break;
     case Btn::SelectAll: glyph = &glyphs::kSelectAll; break;
+    case Btn::Copy:
+    case Btn::ShareTargets:
+    case Btn::CopyNames: glyph = &glyphs::kCopy; break;
     case Btn::Clear:
-    case Btn::Cancel: glyph = &glyphs::kClear; break;
+    case Btn::Cancel:
+    case Btn::DisableTarget:
+    case Btn::CloseTargets: glyph = &glyphs::kClear; break;
     case Btn::Lock: glyph = &glyphs::kLock; break;
     case Btn::FilterMenu: glyph = &glyphs::kFilter; break;
     case Btn::Sort: glyph = &glyphs::kSort; break;
-    default: return;   // Check intentionally has no glyph.
+    case Btn::Settings: glyph = &glyphs::kSettings; break;
+    case Btn::Check:
+    case Btn::Enable:
+    case Btn::EnableTarget: glyph = &glyphs::kCheck; break;
+    case Btn::Theme: glyph = &glyphs::kTheme; break;
+    case Btn::ShareServer: glyph = &glyphs::kServer; break;
+    case Btn::SelfUpdate: glyph = &glyphs::kUpdate; break;
+    default: return;
     }
 
     XSetForeground(d, gc, color);
@@ -788,18 +801,10 @@ int run_ui(ModManager& mm) {
         fill(dpy, win, gc, r.x, r.y, r.w, r.h, fill_color);
         frame(dpy, win, gc, r.x, r.y, r.w, r.h, border_color);
         const std::string label = button_label(b);
-        const bool show_icon = b != Btn::Import && b != Btn::Settings &&
-                               b != Btn::Check && b != Btn::Theme && b != Btn::Enable &&
-                               b != Btn::ShareServer && b != Btn::SelfUpdate &&
-                               b != Btn::EnableTarget && b != Btn::DisableTarget &&
-                               b != Btn::CloseTargets &&
-                               b != Btn::ShareTargets && b != Btn::CopyNames;
-        const int icon_w = show_icon ? 18 : 0;
-        const int gap = show_icon ? 7 : 0;
+        constexpr int icon_w = 18, gap = 7;
         const int label_w = text_width(body, label);
         const int start = r.x + (r.w - icon_w - gap - label_w) / 2;
-        if (show_icon)
-            draw_button_icon(dpy, win, gc, b, start, r.y + r.h / 2, icon_color);
+        draw_button_icon(dpy, win, gc, b, start, r.y + r.h / 2, icon_color);
         text(dpy, win, gc, body, start + icon_w + gap, baseline_for(body, r), label,
              text_color);
         if (filter_button) {
@@ -917,6 +922,10 @@ int run_ui(ModManager& mm) {
 
     auto filter_clear_rect = []() -> Rect {
         return {kMargin + kFilterW - 24, kFilterY + 2, 20, kFilterH - 4};
+    };
+
+    auto input_clear_rect = []() -> Rect {
+        return {kInputX + kInputW - 24, kInputY + 2, 20, kInputH - 4};
     };
 
     auto draw_input = [&](const Rect& r, const std::string& value,
@@ -1164,12 +1173,18 @@ int run_ui(ModManager& mm) {
         text(dpy, win, gc, body, kMargin + 48, 62,
              "Project Zomboid Workshop installer", pal.muted);
         draw_button(Btn::ShareServer);
-        draw_button(Btn::SelfUpdate);
+        if (app_update_available) draw_button(Btn::SelfUpdate);
         draw_button(Btn::Enable);
         draw_button(Btn::Settings);
 
         draw_input({kInputX, kInputY, kInputW, kInputH}, input,
-                   "Paste Workshop URLs or IDs", !filter_focus && !busy, !busy, 0);
+                   "Paste Workshop URLs or IDs", !filter_focus && !busy, !busy,
+                   input.empty() ? 0 : 26);
+        if (!input.empty()) {
+            const Rect clear = input_clear_rect();
+            text(dpy, win, gc, body, clear.x + (clear.w - text_width(body, "X")) / 2,
+                 baseline_for(body, clear), "X", pal.muted);
+        }
         draw_button(Btn::Import);
         draw_button(Btn::Install);
         text(dpy, win, gc, body, kMargin, 142,
@@ -2014,6 +2029,15 @@ int run_ui(ModManager& mm) {
                     break;
                 }
 
+                if (ev.xbutton.button == Button1 && !input.empty()) {
+                    const Rect clear = input_clear_rect();
+                    if (in_rect(x, y, clear.x, clear.y, clear.w, clear.h)) {
+                        input.clear();
+                        filter_focus = false;
+                        redraw();
+                        break;
+                    }
+                }
                 if (in_rect(x, y, kInputX, kInputY, kInputW, kInputH)) {
                     filter_focus = false;
                     redraw();
