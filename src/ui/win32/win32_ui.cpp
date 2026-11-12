@@ -108,12 +108,14 @@ HWND g_set_path = nullptr;
 HWND g_set_root = nullptr;
 HWND g_set_user = nullptr;
 HWND g_set_auto = nullptr;
+bool g_set_auto_checked = false;
 bool g_settings_dark = false;
 HWND g_targets_wnd = nullptr;
 HWND g_tgt_list = nullptr;
 HWND g_tgt_status = nullptr;
 HWND g_tgt_copy = nullptr;
 HWND g_tgt_lock = nullptr;
+bool g_tgt_lock_checked = false;
 HWND g_tgt_copy_names = nullptr;
 std::vector<ActivationTarget> g_targets;
 std::vector<std::vector<std::string>> g_row_mod_ids;
@@ -391,6 +393,24 @@ void draw_checkbox(HDC dc, int x, int y, bool checked) {
     LineTo(dc, x + 14, y + 4);
     SelectObject(dc, old);
     DeleteObject(pen);
+}
+
+// Owner-draw checkbox used by both modal panels, so the control keeps the
+// 18px custom box instead of falling back to the small native theme glyph.
+void draw_checkbox_button(const DRAWITEMSTRUCT* dis, bool checked) {
+    if (!dis) return;
+    RECT r = dis->rcItem;
+    FillRect(dis->hDC, &r, g_card_brush);
+    draw_checkbox(dis->hDC, r.left, r.top + (r.bottom - r.top - 18) / 2, checked);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, g_theme.text);
+    HGDIOBJ old_font = SelectObject(dis->hDC, g_font_body);
+    wchar_t label[128]{};
+    GetWindowTextW(dis->hwndItem, label, 127);
+    RECT text{r.left + 28, r.top, r.right, r.bottom};
+    DrawTextW(dis->hDC, label, -1, &text,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dis->hDC, old_font);
 }
 
 // Buttons in the modal windows: same flat look as the main toolbar, without
@@ -1740,8 +1760,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowTextW(g_set_root,
                        to_w(g_mm->config().steamcmd_root.string()).c_str());
         SetWindowTextW(g_set_user, to_w(g_mm->config().steam_user).c_str());
-        SendMessageW(g_set_auto, BM_SETCHECK,
-                     g_mm->config().auto_enable ? BST_CHECKED : BST_UNCHECKED, 0);
+        g_set_auto_checked = g_mm->config().auto_enable;
         SetFocus(g_set_zomboid);
         return 0;
     case WM_ERASEBKGND: {
@@ -1822,21 +1841,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DRAWITEM: {
         auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
         if (wp == ID_SET_AUTO) {
-            RECT r = dis->rcItem;
-            FillRect(dis->hDC, &r, g_card_brush);
-            const bool checked =
-                SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            draw_checkbox(dis->hDC, r.left, r.top + (r.bottom - r.top - 18) / 2,
-                          checked);
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, g_theme.text);
-            HGDIOBJ old_font = SelectObject(dis->hDC, g_font_body);
-            wchar_t label[128]{};
-            GetWindowTextW(dis->hwndItem, label, 127);
-            RECT text{r.left + 28, r.top, r.right, r.bottom};
-            DrawTextW(dis->hDC, label, -1, &text,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(dis->hDC, old_font);
+            draw_checkbox_button(dis, g_set_auto_checked);
             return TRUE;
         }
         if (wp == ID_SET_SAVE || wp == ID_SET_CANCEL || wp == ID_SET_THEME) {
@@ -1862,11 +1867,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (id == ID_SET_AUTO && code == BN_CLICKED) {
-            // Owner-draw buttons do not toggle themselves.
-            const bool checked =
-                SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) != BST_CHECKED;
-            SendMessageW(g_set_auto, BM_SETCHECK,
-                         checked ? BST_CHECKED : BST_UNCHECKED, 0);
+            // Owner-draw buttons keep their state outside the native button.
+            g_set_auto_checked = !g_set_auto_checked;
             InvalidateRect(g_set_auto, nullptr, TRUE);
             return 0;
         }
@@ -1893,8 +1895,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             MB_OK | MB_ICONWARNING);
                 return 0;
             }
-            const bool auto_enable =
-                SendMessageW(g_set_auto, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            const bool auto_enable = g_set_auto_checked;
             auto log = [](const std::string& s) { append_log(s); };
             auto r1 = run_command(*g_mm, "config steamcmd_exe " + path, log);
             auto r2 = run_command(*g_mm, "config steamcmd_root " + root, log);
@@ -2068,9 +2069,9 @@ void sync_target_lock() {
     if (!g_tgt_lock) return;
     const int sel = (int)SendMessageW(g_tgt_list, LB_GETCURSEL, 0, 0);
     const bool valid = sel >= 0 && sel < (int)g_targets.size();
-    SendMessageW(g_tgt_lock, BM_SETCHECK,
-                 valid && g_targets[(std::size_t)sel].lock_updates
-                     ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_tgt_lock_checked = valid && g_targets[(std::size_t)sel].lock_updates;
+    // Owner-draw buttons do not repaint themselves when the state changes.
+    InvalidateRect(g_tgt_lock, nullptr, TRUE);
     EnableWindow(g_tgt_lock, valid);
 }
 
@@ -2148,7 +2149,7 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 kTgtListW, 32, hwnd, nullptr, nullptr, nullptr);
             set_font(g_tgt_status, g_font_small);
             g_tgt_lock = CreateWindowW(L"BUTTON", L"Lock updates for this target",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
                 kTgtListX, 78, 330, 20, hwnd, (HMENU)ID_TGT_LOCK, nullptr, nullptr);
             set_font(g_tgt_lock, g_font_body);
 
@@ -2238,6 +2239,10 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             draw_target_item(dis);
             return TRUE;
         }
+        if (wp == ID_TGT_LOCK) {
+            draw_checkbox_button(dis, g_tgt_lock_checked);
+            return TRUE;
+        }
         if (wp == ID_TGT_ENABLE || wp == ID_TGT_DISABLE || wp == ID_TGT_COPY ||
             wp == ID_TGT_COPY_NAMES || wp == ID_TGT_CLOSE) {
             draw_dialog_button(dis, wp == ID_TGT_ENABLE);
@@ -2259,13 +2264,18 @@ LRESULT CALLBACK TargetsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (id == ID_TGT_LOCK && HIWORD(wp) == BN_CLICKED) {
-            const bool lock_value =
-                SendMessageW(g_tgt_lock, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            // Owner-draw buttons keep their state outside the native button.
+            g_tgt_lock_checked = !g_tgt_lock_checked;
+            InvalidateRect(g_tgt_lock, nullptr, TRUE);
             const std::string line = "target-lock " + std::to_string(sel) +
-                                     (lock_value ? " on" : " off");
+                                     (g_tgt_lock_checked ? " on" : " off");
             auto log = [](const std::string& s) { append_log(s); };
             auto result = run_command(*g_mm, line, log);
             append_log(std::string(result.ok ? "OK: " : "ERROR: ") + result.message);
+            if (!result.ok) {
+                g_tgt_lock_checked = !g_tgt_lock_checked;
+                InvalidateRect(g_tgt_lock, nullptr, TRUE);
+            }
             if (result.ok) {
                 g_targets = g_mm->activation_targets();
                 fill_target_list();
@@ -2489,9 +2499,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
                 312, 158, 170, 200, hwnd, (HMENU)ID_FILTER_MODE, nullptr, nullptr);
             set_font(g_filter_combo, g_font_small);
-            // A dropdown list sizes its closed field from the item height. Set
-            // the field explicitly so it matches the 24px filter controls.
-            SendMessageW(g_filter_combo, CB_SETITEMHEIGHT, (WPARAM)-1, 24);
+            // A dropdown list sizes its closed field from the item height plus
+            // a 6px frame. Set the field to 18px so the whole control matches
+            // the 24px filter edit and buttons beside it.
+            SendMessageW(g_filter_combo, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
             g_check = CreateWindowW(L"BUTTON", L"Check updates",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 492, 158, 120, 24, hwnd,
                 (HMENU)ID_CHECK, nullptr, nullptr);
