@@ -1454,7 +1454,9 @@ void remove_selected() {
 }
 
 void open_mods_folder(HWND owner) {
-    const std::wstring path = to_w(g_mm->config().user_mods_dir.string());
+    // Use the path's own UTF-16 conversion; Windows env paths may come from
+    // the ANSI code page rather than UTF-8 for non-ASCII user names.
+    const std::wstring path = g_mm->config().user_mods_dir.wstring();
     const HINSTANCE result = ShellExecuteW(owner, L"open", path.c_str(), nullptr,
                                            nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32) {
