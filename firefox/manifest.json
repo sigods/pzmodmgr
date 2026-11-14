@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "PZ Mod Manager",
-  "version": "0.2.6",
+  "version": "0.3.1",
   "description": "Right-click a Project Zomboid Workshop item or collection to install or update it with pzmodmgr.",
   "permissions": ["menus", "nativeMessaging", "notifications"],
   "background": {

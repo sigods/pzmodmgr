@@ -85,8 +85,12 @@ rm -f "$OUT/$NAME.zip"
 ( cd "$OUT" && zip -q -r -9 "$NAME.zip" "$NAME" )
 
 echo "==> building small uninstaller"
-x86_64-w64-mingw32-windres -I "$ROOT/installer" \
-    "$ROOT/installer/uninstaller.rc" -O coff -o "$WORK/uninstaller-res.o"
+WIN_FILEVERSION=$(printf '%s' "$VERSION" | awk -F. '{ printf "%d,%d,%d,0", $1, $2, $3 }')
+sed "s/@VERSION@/$VERSION/g" "$ROOT/installer/setup.manifest.in" > "$WORK/setup.manifest"
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@FILEVERSION@/$WIN_FILEVERSION/g" \
+    "$ROOT/installer/uninstaller.rc.in" > "$WORK/uninstaller.rc"
+x86_64-w64-mingw32-windres -I "$WORK" -I "$ROOT/installer" \
+    "$WORK/uninstaller.rc" -O coff -o "$WORK/uninstaller-res.o"
 "$WIN_CXX" -std=c++17 -Os -municode -mwindows \
     -static -static-libgcc -static-libstdc++ -fno-exceptions -fno-rtti \
     -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
@@ -121,8 +125,10 @@ cat > "$WORK/payload.rc" <<EOF
 2016 RCDATA "$PAYLOAD/uninstall.exe"
 EOF
 
-x86_64-w64-mingw32-windres -I "$ROOT/installer" \
-    "$ROOT/installer/installer.rc" -O coff -o "$WORK/installer-res.o"
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@FILEVERSION@/$WIN_FILEVERSION/g" \
+    "$ROOT/installer/installer.rc.in" > "$WORK/installer.rc"
+x86_64-w64-mingw32-windres -I "$WORK" -I "$ROOT/installer" \
+    "$WORK/installer.rc" -O coff -o "$WORK/installer-res.o"
 x86_64-w64-mingw32-windres "$WORK/payload.rc" -O coff -o "$WORK/payload-res.o"
 
 "$WIN_CXX" -std=c++17 -Os -municode -mwindows \
@@ -133,7 +139,7 @@ x86_64-w64-mingw32-windres "$WORK/payload.rc" -O coff -o "$WORK/payload-res.o"
     -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
     -DPZ_VERSION="L\"$VERSION\"" \
     -I"$ROOT/installer" \
-    "$ROOT/installer/installer.cpp" "$ROOT/src/core/runtime_min.cpp" \
+    "$ROOT/installer/installer.cpp" "$ROOT/installer/runtime_min.cpp" \
     "$WORK/installer-res.o" "$WORK/payload-res.o" \
     -o "$OUT/$NAME-setup.exe" \
     -lcomctl32 -lshell32 -lshlwapi -lole32 -luuid -ladvapi32 \

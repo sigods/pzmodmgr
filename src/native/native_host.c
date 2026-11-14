@@ -1,7 +1,7 @@
 /* Firefox native messaging host: one framed JSON request per process.
  * Supported request: {"url":"<workshop item or collection url/id>"}
  *
- * The host is deliberately C99 and does not link the C++ core. It drives the
+ * The host is deliberately C99 and links only the URL helper. It drives the
  * sibling pzmodmgr executable through the same CLI that users see, captures its
  * output, and returns the framed JSON reply the extension expects.
  */

@@ -4,7 +4,7 @@ Instructions for AI coding agents working in this repository.
 
 ## Project
 
-`pzmodmgr` is a native C++17 mod installer and manager for Project Zomboid.
+`pzmodmgr` is a native C99 mod installer and manager for Project Zomboid. The app, core, native UIs, and tests are all C99; the build does not enable C++.
 
 - Downloads Steam Workshop items with a built-in `steamcmd` (app 108600), bootstrapped from Valve into `~/Zomboid/pzmodmgr/steamcmd` on first use.
 - Copies the mod files into the user mods folder `~/Zomboid/mods` (Windows: `%USERPROFILE%\Zomboid\mods`), or `<zomboid_dir>/mods` when a custom base folder is configured.
@@ -19,17 +19,19 @@ Instructions for AI coding agents working in this repository.
 
 ## Layout
 
-- `CMakeLists.txt`: builds `pzcore` (static lib) and `pzmodmgr` (exe). Selects the UI per platform.
-- `src/core/`: platform-neutral logic. No UI headers, no OS-specific UI calls.
-- `src/core/steamcmd.cpp`: the only place that spawns processes; also bootstraps the built-in steamcmd.
-- `src/native/native_host.cpp`: Firefox native messaging stdio host; stdout is protocol-only.
+- `CMakeLists.txt`: builds `pzcore`, `pzfs`, the C tests, and `pzmodmgr` (exe). Selects the UI per platform.
+- `src/core/`: platform-neutral C99 logic. No UI headers, no OS-specific UI calls.
+- `src/app/app_c.c`: app composition (config load, service table, CLI/UI dispatch).
+- `src/core/process_c.c`: the only place that spawns processes.
+- `src/core/steamcmd_c.c`: steamcmd bootstrap, Workshop downloads, Steam Web API.
+- `src/native/native_host.c`: Firefox native messaging stdio host; stdout is protocol-only.
 - `firefox/`, `scripts/install_firefox_host.sh`: right-click add-on and its registration.
-- `src/core/mod_manager.cpp`: install, remove, update, the `installed.tsv` database, and the temporary swap copy.
-- `src/core/commands.cpp`: the command parser shared by CLI and both UIs.
-- `src/ui/win32/`, `src/ui/x11/`: UI code only. They call `run_command`, never core internals directly.
-- `src/ui/win32/win32_entry.cpp`: the Windows GUI entry point (`wWinMain`). Decodes the UTF-16 command line, re-attaches a console for CLI mode, then calls `pz::run_app` from `src/main.cpp`.
-- `src/ui/mod_icon.cpp`, `third_party/stb_image.h`: shared icon decoding for the two native UIs.
-- `src/core/mod_info.cpp`: resolves the `icon=` PNG and version bounds from B41/B42 mod layouts.
+- `src/core/mod_manager_c.c`: install, remove, update, the `installed.tsv` database, and the temporary swap copy.
+- `src/core/commands_c.c`: the command parser shared by CLI and both UIs.
+- `src/ui/win32/`, `src/ui/x11/`: C UI code only. They call `pz_command_run`, never core internals directly.
+- `src/main.c`: portable `main()`; `src/ui/win32/win32_entry.c`: Windows GUI entry (`wWinMain`). Both call `pz_app_run()`.
+- `src/ui/mod_icon_c.c`, `third_party/stb_image.h`: shared icon decoding for the two native UIs.
+- `src/core/mod_info_c.c`, `mod_info_fs_c.c`: parse `mod.info` and resolve icons/version bounds from B41/B42 mod layouts.
 
 ## Build and run
 
@@ -58,15 +60,15 @@ Rules for agents
 
     Keep core free of UI code. Anything the user can do goes through run_command.
     Keep stdout clean in the native host: only framed JSON messages, logs go in the response.
-    Keep pzmodmgr a GUI-subsystem program on Windows (WIN32_EXECUTABLE on MSVC/MinGW). Do not add a console subsystem or a second console-only target; its entry point is wWinMain in src/ui/win32/win32_entry.cpp, which calls pz::run_app from main.cpp. pzmodmgr_native_host must stay console-subsystem.
+    Keep pzmodmgr a GUI-subsystem program on Windows (WIN32_EXECUTABLE on MSVC/MinGW). Do not add a console subsystem or a second console-only target; its entry point is wWinMain in src/ui/win32/win32_entry.c, which calls pz_app_run from src/app/app_c.c. pzmodmgr_native_host must stay console-subsystem.
     Never store, log, or pass a Steam password. Authentication relies on steamcmd's cached login. Do not add +login user pass.
     Never delete a folder in the mods folder (default ~/Zomboid/mods, or <zomboid_dir>/mods) that the manager did not install (check installed.tsv first). Move the old folder aside for the swap, restore it on failure, and delete it after success; do not retain persistent backups. A folder adopted from a manual install is recorded as external and is left in place on remove.
     Never write outside the Zomboid folder (default ~/Zomboid, or the user-set zomboid_dir), the user-set steamcmd path, and the installed config.ini next to the executable. The built-in steamcmd lives in <zomboid_dir>/pzmodmgr/steamcmd. Do not create a bootstrap config in the default Zomboid folder when an installed adjacent config.ini exists.
     UI actions that call steamcmd must not block the UI thread. Use a worker thread and marshal logs back (PostMessage on Win32, a self-pipe on X11).
     Quote all paths and arguments when building shell commands. Do not concatenate raw user input into a command without the quote() helper.
-    Keep the code C++17 and dependency-free beyond the OS SDK, Xlib, and the vendored
-    `stb_image` decoder used for mod icons.
-    Do not invent steamcmd output formats. Verify the content path against a real download before changing steamcmd.cpp.
+    Keep the app, core, UIs, and tests C99, dependency-free beyond the OS SDK,
+    Xlib, and the vendored `stb_image` decoder used for mod icons. Do not add C++.
+    Do not invent steamcmd output formats. Verify the content path against a real download before changing steamcmd_c.c.
     Add a test for any change to parse_workshop_id, discover_mod_roots, or read_mod_info.
 
 Open TODO (priority order)
@@ -76,7 +78,7 @@ Open TODO (priority order)
 
 Style
 
-    namespace pz, 4-space indent, #pragma once headers.
-    Return Result{ok, message} from commands. Do not throw across UI boundaries.
-    Log user-facing progress through the LogFn callback.
+    4-space indent, C99 everywhere, `#pragma once` or include guards in headers.
+    Return `pz_mm_result{ok, message}` from commands; free it with
+    `pz_mm_result_free()`. Log user-facing progress through `pz_log`.
     
