@@ -1545,6 +1545,11 @@ static void update_actions(void) {
         EnableWindow(g_ui.self_update,
                      !g_ui.busy && g_ui.app_update_available);
     }
+    if (g_ui.open_mods) {
+        SetWindowPos(g_ui.open_mods, NULL,
+                     g_ui.app_update_available ? 320 : 440, 24, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     if (g_ui.share_server_btn)
         EnableWindow(g_ui.share_server_btn, !g_ui.busy);
     if (g_ui.select_all)
