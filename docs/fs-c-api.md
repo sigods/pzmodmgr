@@ -2,15 +2,15 @@
 
 Status: **implemented** on `c99/leaf-modules`. `src/core/fs_c.{h,c}`,
 `src/core/fs_posix.c`, and `src/core/fs_win.c` build the `pzfs` static
-library, and `tests/test_c_fs.c` runs against both backends (Linux natively,
+library, and `tests/test_fs.c` runs against both backends (Linux natively,
 the Win32 backend under Wine). `pzfs` is linked into the app and
-`mod_manager_c.c` uses it for every filesystem operation. `native_fs` remains
+`mod_manager.c` uses it for every filesystem operation. `native_fs` remains
 as the C++ path type for the UI and the not-yet-ported `mod.info`/activation
 wrappers; `fs_posix.cpp` / `fs_win.cpp` are unchanged.
 
 Layering:
 
-- `fs_c.c` (platform-neutral): `pz_path` helpers, normalization, error names and
+- `fs.c` (platform-neutral): `pz_path` helpers, normalization, error names and
   formatting, entry sorting and cleanup, copy-tree walk.
 - `fs_posix.c`: `pz_fs_*` operations with POSIX calls.
 - `fs_win.c`: the same operations with Win32 wide calls and the UTF-8→UTF-16
@@ -163,9 +163,9 @@ directory, flushes it, and renames over `to` (`rename` on POSIX,
 `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` on Windows).
 On failure the temporary is removed and `to` is untouched.
 
-`paths.cpp` implements this pattern for its C++ callers. `mod_manager_c.c`
+`paths.cpp` implements this pattern for its C++ callers. `mod_manager.c`
 writes its database/state files through the same C-level atomic replace, and
-`net_c.c` downloads through it. The remaining C++ copy in `paths.cpp` can move
+`net.c` downloads through it. The remaining C++ copy in `paths.cpp` can move
 to this call when its callers are ported.
 
 ### 13. File I/O uses an opaque handle
@@ -180,8 +180,8 @@ distinguishes them without a second out-parameter on the hot path.
 
 ### 14. Tests are one C99 binary, run on both platforms
 
-New `pzcore_fs_c_tests` in the existing `if(UNIX)` block, built from
-`tests/test_c_fs.c` plus the `fs_c` sources. It creates its own temporary
+New `pzcore_fs_tests` in the existing `if(UNIX)` block, built from
+`tests/test_fs.c` plus the `fs_c` sources. It creates its own temporary
 fixtures, like `test_core.cpp`, so there are no repository fixtures. The Windows
 half is the same source cross-built and run under Wine in the existing Windows
 verification step; `ctest` does not cross-run today, and this does not change
@@ -193,7 +193,7 @@ removal, timestamp round-trip, error formatting, handles/`read_all`, and the
 executable bit. The same source runs on both backends: 8/8 CTest tests pass on
 Linux, and the Win32 build passes under Wine.
 
-## API (`src/core/fs_c.h`)
+## API (`src/core/fs.h`)
 
 Proposed signatures and types, kept here so the design can be reviewed before
 a header exists. C99, `extern "C"`, and the same return convention as the
@@ -223,7 +223,7 @@ other `_c` modules (1 on success, 0 on failure with `pz_fs_error`).
  * Design decisions and the questions they answer are in docs/fs-c-api.md.
  */
 
-#include "core/c_util.h"
+#include "core/util.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -425,14 +425,14 @@ preserves timestamps. None are used by the manager today.
 
 ## Implementation status
 
-- [x] `fs_c.c`: `pz_path`, normalization, error names/formatting, entry list
+- [x] `fs.c`: `pz_path`, normalization, error names/formatting, entry list
       sorting, `remove_all`, `copy_tree`, and `read_all`.
-- [x] `fs_posix.c`: the whole header with POSIX calls; `pzcore_fs_c_tests`
+- [x] `fs_posix.c`: the whole header with POSIX calls; `pzcore_fs_tests`
       green on Linux.
 - [x] `fs_win.c`: the same operations, extended-length prefixes, strict UTF-8,
       read-only clearing, `MoveFileExW` replace; the same test source passes
       under Wine.
-- [x] `mod_manager_c.c` uses `pzfs` for database/state I/O, installation,
+- [x] `mod_manager.c` uses `pzfs` for database/state I/O, installation,
       backup moves, import copies, and remove operations.
 - [ ] Remove the remaining `native_fs` uses from the UI, `mod_info`, and
       activation wrappers, then delete the duplicate C++ path implementation.

@@ -43,39 +43,39 @@ if(PZMODMGR_SIZE_OPT AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
 endif()
 
 if(WIN32)
-  set(PZMODMGR_FS_C_SOURCE src/core/fs_win.c)
+  set(PZMODMGR_FS_SOURCE src/core/fs_win.c)
 else()
-  set(PZMODMGR_FS_C_SOURCE src/core/fs_posix.c)
+  set(PZMODMGR_FS_SOURCE src/core/fs_posix.c)
 endif()
 
 # The C filesystem layer used by the core, app, UIs, and tests.
-add_library(pzfs STATIC src/core/fs_c.c ${PZMODMGR_FS_C_SOURCE})
+add_library(pzfs STATIC src/core/fs.c ${PZMODMGR_FS_SOURCE})
 target_include_directories(pzfs PUBLIC src)
 
 # Platform-neutral core used by the shipped app and the tests.
 add_library(pzcore STATIC
-  src/core/c_util.c
-  src/core/hash_c.c
-  src/core/json_c.c
-  src/core/steam_json_c.c
-  src/core/updater_json_c.c
-  src/core/paths_c.c
-  src/core/process_c.c
-  src/core/net_c.c
-  src/core/steamcmd_c.c
-  src/core/updater_c.c
-  src/core/activation_c.c
-  src/core/activation_targets_c.c
+  src/core/util.c
+  src/core/hash.c
+  src/core/json.c
+  src/core/steam_json.c
+  src/core/updater_json.c
+  src/core/paths.c
+  src/core/process.c
+  src/core/net.c
+  src/core/steamcmd.c
+  src/core/updater.c
+  src/core/activation.c
+  src/core/activation_targets.c
   src/core/url.c
-  src/core/mod_info_c.c
-  src/core/mod_info_fs_c.c
-  src/core/mod_manager_c.c
-  src/core/commands_c.c)
+  src/core/mod_info.c
+  src/core/mod_info_fs.c
+  src/core/mod_manager.c
+  src/core/commands.c)
 target_include_directories(pzcore PUBLIC src)
 target_link_libraries(pzcore PUBLIC Threads::Threads pzfs)
 target_compile_definitions(pzcore PUBLIC PZMODMGR_VERSION="${PROJECT_VERSION}")
 
-add_executable(pzmodmgr src/main.c src/app/app_c.c src/ui/mod_icon_c.c)
+add_executable(pzmodmgr src/main.c src/app/app.c src/ui/mod_icon.c)
 target_include_directories(pzmodmgr PRIVATE third_party)
 target_link_libraries(pzmodmgr PRIVATE pzcore Threads::Threads)
 
@@ -95,7 +95,7 @@ if(WIN32)
   configure_file(src/ui/win32/pzmodmgr.rc.in
                  "${CMAKE_CURRENT_BINARY_DIR}/pzmodmgr.rc" @ONLY)
   target_sources(pzmodmgr PRIVATE
-    src/ui/win32/win32_ui_c.c
+    src/ui/win32/win32_ui.c
     src/ui/win32/win32_entry.c
     "${CMAKE_CURRENT_BINARY_DIR}/pzmodmgr.rc")
   # CommandLineToArgvW, used by the wide entry point.
@@ -124,7 +124,7 @@ if(WIN32)
   endif()
 else()
   find_package(X11 REQUIRED)
-  target_sources(pzmodmgr PRIVATE src/ui/x11/x11_ui_c.c)
+  target_sources(pzmodmgr PRIVATE src/ui/x11/x11_ui.c)
   target_include_directories(pzmodmgr PRIVATE ${X11_INCLUDE_DIR})
   # Link only Xlib itself. The legacy X11_LIBRARIES variable also lists SM,
   # ICE and Xext, none of which this UI uses; leaving them as direct NEEDED
@@ -162,55 +162,55 @@ endif()
 # Core tests; the install-flow tests copy the fake steamcmd to a temp dir at
 # runtime and need a POSIX shell.
 if(UNIX)
-  add_executable(pzcore_c_tests tests/test_c_util.c src/core/c_util.c)
-  target_include_directories(pzcore_c_tests PRIVATE src)
-  add_test(NAME pzcore_c_tests COMMAND pzcore_c_tests)
+  add_executable(pzcore_util_tests tests/test_util.c src/core/util.c)
+  target_include_directories(pzcore_util_tests PRIVATE src)
+  add_test(NAME pzcore_util_tests COMMAND pzcore_util_tests)
 
-  add_executable(pzcore_mod_info_c_tests
-                 tests/test_c_mod_info.c src/core/c_util.c src/core/mod_info_c.c)
-  target_include_directories(pzcore_mod_info_c_tests PRIVATE src)
-  add_test(NAME pzcore_mod_info_c_tests COMMAND pzcore_mod_info_c_tests)
+  add_executable(pzcore_mod_info_tests
+                 tests/test_mod_info.c src/core/util.c src/core/mod_info.c)
+  target_include_directories(pzcore_mod_info_tests PRIVATE src)
+  add_test(NAME pzcore_mod_info_tests COMMAND pzcore_mod_info_tests)
 
-  add_executable(pzcore_paths_c_tests
-                 tests/test_c_paths.c src/core/c_util.c src/core/paths_c.c)
-  target_include_directories(pzcore_paths_c_tests PRIVATE src)
-  target_link_libraries(pzcore_paths_c_tests PRIVATE pzfs)
-  add_test(NAME pzcore_paths_c_tests COMMAND pzcore_paths_c_tests)
+  add_executable(pzcore_paths_tests
+                 tests/test_paths.c src/core/util.c src/core/paths.c)
+  target_include_directories(pzcore_paths_tests PRIVATE src)
+  target_link_libraries(pzcore_paths_tests PRIVATE pzfs)
+  add_test(NAME pzcore_paths_tests COMMAND pzcore_paths_tests)
 
-  add_executable(pzcore_process_c_tests
-                 tests/test_c_process.c src/core/c_util.c src/core/process_c.c)
-  target_link_libraries(pzcore_process_c_tests PRIVATE pzfs)
-  add_test(NAME pzcore_process_c_tests COMMAND pzcore_process_c_tests)
+  add_executable(pzcore_process_tests
+                 tests/test_process.c src/core/util.c src/core/process.c)
+  target_link_libraries(pzcore_process_tests PRIVATE pzfs)
+  add_test(NAME pzcore_process_tests COMMAND pzcore_process_tests)
 
-  add_executable(pzcore_updater_c_tests
-                 tests/test_c_updater.c src/core/c_util.c src/core/process_c.c
-                 src/core/net_c.c src/core/updater_c.c src/core/updater_json_c.c
-                 src/core/json_c.c src/core/hash_c.c)
-  target_link_libraries(pzcore_updater_c_tests PRIVATE pzfs)
-  add_test(NAME pzcore_updater_c_tests COMMAND pzcore_updater_c_tests)
+  add_executable(pzcore_updater_tests
+                 tests/test_updater.c src/core/util.c src/core/process.c
+                 src/core/net.c src/core/updater.c src/core/updater_json.c
+                 src/core/json.c src/core/hash.c)
+  target_link_libraries(pzcore_updater_tests PRIVATE pzfs)
+  add_test(NAME pzcore_updater_tests COMMAND pzcore_updater_tests)
 
-  add_executable(pzcore_activation_c_tests
-                 tests/test_c_activation.c src/core/c_util.c src/core/activation_c.c)
-  target_include_directories(pzcore_activation_c_tests PRIVATE src)
-  add_test(NAME pzcore_activation_c_tests COMMAND pzcore_activation_c_tests)
+  add_executable(pzcore_activation_tests
+                 tests/test_activation.c src/core/util.c src/core/activation.c)
+  target_include_directories(pzcore_activation_tests PRIVATE src)
+  add_test(NAME pzcore_activation_tests COMMAND pzcore_activation_tests)
 
-  add_executable(pzcore_json_c_tests
-                 tests/test_c_json.c src/core/c_util.c src/core/hash_c.c
-                 src/core/json_c.c src/core/steam_json_c.c
-                 src/core/updater_json_c.c)
-  target_include_directories(pzcore_json_c_tests PRIVATE src)
-  add_test(NAME pzcore_json_c_tests COMMAND pzcore_json_c_tests)
+  add_executable(pzcore_json_tests
+                 tests/test_json.c src/core/util.c src/core/hash.c
+                 src/core/json.c src/core/steam_json.c
+                 src/core/updater_json.c)
+  target_include_directories(pzcore_json_tests PRIVATE src)
+  add_test(NAME pzcore_json_tests COMMAND pzcore_json_tests)
 
-  add_executable(pzcore_fs_c_tests tests/test_c_fs.c src/core/c_util.c)
-  target_link_libraries(pzcore_fs_c_tests PRIVATE pzfs)
-  add_test(NAME pzcore_fs_c_tests COMMAND pzcore_fs_c_tests)
+  add_executable(pzcore_fs_tests tests/test_fs.c src/core/util.c)
+  target_link_libraries(pzcore_fs_tests PRIVATE pzfs)
+  add_test(NAME pzcore_fs_tests COMMAND pzcore_fs_tests)
 
-  add_executable(pzcore_c_core_tests tests/test_c_core.c)
-  target_link_libraries(pzcore_c_core_tests PRIVATE pzcore)
-  target_compile_definitions(pzcore_c_core_tests PRIVATE
+  add_executable(pzcore_core_tests tests/test_core.c)
+  target_link_libraries(pzcore_core_tests PRIVATE pzcore)
+  target_compile_definitions(pzcore_core_tests PRIVATE
                              FAKE_STEAMCMD_PATH="${CMAKE_CURRENT_SOURCE_DIR}/tests/fake_steamcmd.sh"
                              PZMODMGR_TEST_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
-  add_test(NAME pzcore_c_core_tests COMMAND pzcore_c_core_tests)
+  add_test(NAME pzcore_core_tests COMMAND pzcore_core_tests)
 
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
@@ -224,6 +224,6 @@ endif()
 # The same C filesystem test source, cross-built so fs_win.c is exercised under
 # Wine by the Windows verification step (and manually with `wine`).
 if(WIN32)
-  add_executable(pzcore_fs_c_tests tests/test_c_fs.c src/core/c_util.c)
-  target_link_libraries(pzcore_fs_c_tests PRIVATE pzfs)
+  add_executable(pzcore_fs_tests tests/test_fs.c src/core/util.c)
+  target_link_libraries(pzcore_fs_tests PRIVATE pzfs)
 endif()

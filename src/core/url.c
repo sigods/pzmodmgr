@@ -1,4 +1,4 @@
-#include "core/url_c.h"
+#include "core/url.h"
 
 #include <ctype.h>
 #include <stdlib.h>

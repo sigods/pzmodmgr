@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "core/fs_c_internal.h"
+#include "core/fs_internal.h"
 
 #include <dirent.h>
 #include <errno.h>

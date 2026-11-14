@@ -10,7 +10,7 @@
  * the command line arrives as UTF-16 and must be converted for pz_app_run().
  */
 #define _CRT_SECURE_NO_WARNINGS
-#include "app/app_c.h"
+#include "app/app.h"
 
 #include <windows.h>
 #include <shellapi.h>

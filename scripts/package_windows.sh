@@ -18,12 +18,12 @@ STAGE="$OUT/$NAME"
 WORK="$BUILD/packaging"
 PAYLOAD="$WORK/payload"
 
-WIN_CXX=x86_64-w64-mingw32-g++-posix
-if ! command -v "$WIN_CXX" >/dev/null 2>&1; then
-    WIN_CXX=x86_64-w64-mingw32-g++
+WIN_CC=x86_64-w64-mingw32-gcc-posix
+if ! command -v "$WIN_CC" >/dev/null 2>&1; then
+    WIN_CC=x86_64-w64-mingw32-gcc
 fi
 
-for tool in cmake "$WIN_CXX" x86_64-w64-mingw32-windres zip; do
+for tool in cmake "$WIN_CC" x86_64-w64-mingw32-windres zip; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "error: $tool is required (install MinGW-w64, cmake and zip)" >&2
         exit 1
@@ -91,10 +91,10 @@ sed -e "s/@VERSION@/$VERSION/g" -e "s/@FILEVERSION@/$WIN_FILEVERSION/g" \
     "$ROOT/installer/uninstaller.rc.in" > "$WORK/uninstaller.rc"
 x86_64-w64-mingw32-windres -I "$WORK" -I "$ROOT/installer" \
     "$WORK/uninstaller.rc" -O coff -o "$WORK/uninstaller-res.o"
-"$WIN_CXX" -std=c++17 -Os -municode -mwindows \
-    -static -static-libgcc -static-libstdc++ -fno-exceptions -fno-rtti \
+"$WIN_CC" -std=c99 -Os -municode -mwindows \
+    -static -static-libgcc \
     -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
-    "$ROOT/installer/uninstaller.cpp" "$WORK/uninstaller-res.o" \
+    "$ROOT/installer/uninstaller.c" "$WORK/uninstaller-res.o" \
     -o "$STAGE/uninstall.exe" \
     -lshell32 -lshlwapi -ladvapi32 -luser32
 if command -v "$strip_tool" >/dev/null 2>&1; then
@@ -131,15 +131,15 @@ x86_64-w64-mingw32-windres -I "$WORK" -I "$ROOT/installer" \
     "$WORK/installer.rc" -O coff -o "$WORK/installer-res.o"
 x86_64-w64-mingw32-windres "$WORK/payload.rc" -O coff -o "$WORK/payload-res.o"
 
-"$WIN_CXX" -std=c++17 -Os -municode -mwindows \
-    -static -static-libgcc -static-libstdc++ \
-    -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
+"$WIN_CC" -std=c99 -Os -municode -mwindows \
+    -static -static-libgcc \
+    -ffunction-sections -fdata-sections \
     -fno-unwind-tables -fno-asynchronous-unwind-tables \
     -Wl,--gc-sections \
     -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 \
     -DPZ_VERSION="L\"$VERSION\"" \
     -I"$ROOT/installer" \
-    "$ROOT/installer/installer.cpp" "$ROOT/installer/runtime_min.cpp" \
+    "$ROOT/installer/installer.c" \
     "$WORK/installer-res.o" "$WORK/payload-res.o" \
     -o "$OUT/$NAME-setup.exe" \
     -lcomctl32 -lshell32 -lshlwapi -lole32 -luuid -ladvapi32 \

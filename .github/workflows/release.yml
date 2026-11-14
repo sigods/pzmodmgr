@@ -62,7 +62,7 @@ jobs:
       - name: Install MinGW-w64 and UPX
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64-posix zip unzip upx-ucl
+          sudo apt-get install -y mingw-w64 gcc-mingw-w64-x86-64-posix zip unzip upx-ucl
 
       - name: Verify tag matches project version
         run: |

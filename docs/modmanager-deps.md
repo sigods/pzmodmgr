@@ -16,20 +16,20 @@ wrapper before that can happen.
 
 | Use | cpp | hpp | What it does in `ModManager` | Leaf module that replaces it | Status |
 | --- | ---: | ---: | --- | --- | --- |
-| `std::string` | 98 | 17 | Folders, mod IDs, messages, `installed.tsv` fields | `pz_str` (`c_util`) | done |
-| `std::vector` | 58 | 19 | Installed records, candidates, paths to move, ID lists | `pz_vec` (`c_util`) | done |
+| `std::string` | 98 | 17 | Folders, mod IDs, messages, `installed.tsv` fields | `pz_str` (`util`) | done |
+| `std::vector` | 58 | 19 | Installed records, candidates, paths to move, ID lists | `pz_vec` (`util`) | done |
 | `std::uint64_t` / `std::uint32_t` | 62 / 2 | 28 | Workshop IDs, sizes, `time_updated` | `<stdint.h>` types | n/a |
 | `std::size_t` | 23 | — | Container indices and loop counters | `<stddef.h>` `size_t` | n/a |
-| `std::to_string` | 83 | — | Building log lines, cache folder names, TSV rows | `pz_str_append_u64` (`c_util`) | done |
-| `std::find` | 12 | — | Linear scans of mod-ID and target lists | `pz_vec_find` / `pz_str` key compare (`c_util`) | helper missing |
+| `std::to_string` | 83 | — | Building log lines, cache folder names, TSV rows | `pz_str_append_u64` (`util`) | done |
+| `std::find` | 12 | — | Linear scans of mod-ID and target lists | `pz_vec_find` / `pz_str` key compare (`util`) | helper missing |
 | `std::find_if` | 4 | — | Pick an activation target by kind and name | same, with a predicate callback | helper missing |
 | `std::any_of` | 2 | — | "Is this Workshop ID tracked?" | loop over `pz_vec` | mechanical |
-| `std::remove_if` | 3 | — | Drop records from `db_` and IDs from a list | `pz_vec_remove_if` (`c_util`) | helper missing |
+| `std::remove_if` | 3 | — | Drop records from `db_` and IDs from a list | `pz_vec_remove_if` (`util`) | helper missing |
 | `std::sort` | 1 | — | Sort discovered ACF items by Workshop ID (line 424) | `pz_vec_sort` (insertion sort like `mod_info`/UI) | helper missing |
 | `std::move` | 6 | — | Transfer ownership on construct, swap, pick-best | assignment / swap of owned pointers | mechanical |
-| `std::min` / `std::max` | 1 / 1 | — | Clamp worker count, take newest timestamp | `pz_min` / `pz_max` inline (`c_util`) | trivial |
+| `std::min` / `std::max` | 1 / 1 | — | Clamp worker count, take newest timestamp | `pz_min` / `pz_max` inline (`util`) | trivial |
 | `std::atomic<std::size_t>` | 1 | — | Worker index for the four parallel API lookups (line 245) | `<stdatomic.h>` in planned `thread_c` | module missing |
-| `std::strtoull` / `std::strtoll` | 3 / 1 | — | Parse `installed.tsv` numbers and version fields | `pz_parse_u64` / `pz_parse_i64` (`c_util`) | helper missing |
+| `std::strtoull` / `std::strtoll` | 3 / 1 | — | Parse `installed.tsv` numbers and version fields | `pz_parse_u64` / `pz_parse_i64` (`util`) | helper missing |
 | `std::time` | 2 | — | Cache stamp and `last_check` epoch seconds | `<time.h>` `time()` | mechanical |
 | `std::isspace` / `std::isdigit` / `std::tolower` | 3 / 3 / 1 | — | Trim lines, validate folder names, case-fold IDs | `<ctype.h>` | mechanical |
 | `std::string::npos` | 3 | — | `find_first_not_of` / `find` sentinels | `SIZE_MAX` from `pz_str_find` | helper missing |
@@ -63,7 +63,7 @@ section.
 | `fs::last_write_time` | 1 | — | Prune stale swap copies by age (64) | `pz_fs_last_write_time` |
 | `fs::file_time_type` / `file_time_now` | 1 / 1 | — | Age comparison; already epoch seconds (57, 61) | `int64_t` epoch seconds |
 
-`fs::permissions` is not used by `ModManager`; it is called by `steamcmd_c.c`
+`fs::permissions` is not used by `ModManager`; it is called by `steamcmd.c`
 and the tests, so it stays on the C++ backend for now.
 
 ## Other modules `ModManager` already leans on
@@ -133,9 +133,9 @@ The fourteen questions that were open on this branch are now decided in
 11. Invalid UTF-8 fails with `PZ_FS_INVALID` rather than substituting
     replacement characters.
 12. Atomic replace moves into the fs layer as `pz_fs_replace_file`, replacing
-    the duplicate temp+rename code in `paths.cpp` and `net_c.c`.
+    the duplicate temp+rename code in `paths.cpp` and `net.c`.
 13. File I/O is an opaque `pz_fs_file` handle (`pz_fs_open_read/write`,
     `pz_fs_read/write`, `pz_fs_read_all`), so the text module never converts
     paths.
-14. One C99 `pzcore_fs_c_tests` binary runs on Linux and, cross-built, under
+14. One C99 `pzcore_fs_tests` binary runs on Linux and, cross-built, under
     Wine; it builds its own temporary fixtures.

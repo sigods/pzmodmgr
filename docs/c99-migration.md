@@ -5,7 +5,7 @@ Status for 0.3.1: the C99 conversion, C test suite, and C++ removal are complete
 ## Final state: the repository is C99-only
 
 - `src/main.c` owns `main()` and `src/ui/win32/win32_entry.c` owns `wWinMain`.
-  Both call `pz_app_run()` in `src/app/app_c.c`, which loads the config, builds
+  Both call `pz_app_run()` in `src/app/app.c`, which loads the config, builds
   the service table, and runs the CLI or native UI.
 - `pzcore`, `pzfs`, both native UIs, the app, and every test are C99.
   `CMakeLists.txt` declares `project(pzmodmgr ... LANGUAGES C)`.
@@ -18,7 +18,7 @@ Status for 0.3.1: the C99 conversion, C test suite, and C++ removal are complete
 - A fresh Xvfb screenshot pair of the pre-C99 and final Linux UI is pixel
   identical at 1100×900 after the logo baseline and filter chevron fixes.
 - The C test suite has ten CTest entries, including the C manager/import/
-  update-flow integration test in `tests/test_c_core.c`.
+  update-flow integration test in `tests/test_core.c`.
 
 ### Runtime memory
 
@@ -33,7 +33,7 @@ The idle C process uses slightly less resident memory. With 512 mods it uses
 +740 KB because the C UI's rows hold fixed inline name/folder buffers instead
 of `std::string` allocations; the total is still under 5 MB. VmData on the old
 build is larger because its four update-check threads reserve malloc arenas.
-There is no leak indication: `pzcore_c_core_tests` passes under ASan/UBSan, and
+There is no leak indication: `pzcore_core_tests` passes under ASan/UBSan, and
 repeated runs stay flat. Shrinking the row structure would need dynamic strings
 and is not worth the complexity for a sub-5 MB footprint.
 
@@ -44,9 +44,9 @@ Names such as `mod_manager.cpp` refer to files that have since been deleted.
 
 ### Completed steps
 
-- [x] Shared C99 layer: `src/core/c_util.{h,c}` provides `pz_str`, `pz_vec`,
+- [x] Shared C99 layer: `src/core/util.{h,c}` provides `pz_str`, `pz_vec`,
       `pz_error`, and `pz_log`, with allocation-failure-returning APIs and no
-      exception use. `tests/test_c_util.c` covers string growth/aliasing,
+      exception use. `tests/test_util.c` covers string growth/aliasing,
       vectors, error formatting, and log callbacks.
 - [x] `error_code` stores a `pz_error`; its C++ API is unchanged.
 - [x] `mod_info_c.{h,c}` owns `mod.info` parsing, required-ID normalization,
@@ -72,7 +72,7 @@ Names such as `mod_manager.cpp` refer to files that have since been deleted.
       `parse_latest_app_release`, `verify_sha256`) were thin adapters over the C
       parsers. The steamcmd/updater headers that held them were removed once
       their callers moved to the C API directly.
-- [x] C99 tests: `pzcore_json_c_tests` covers the SHA-256 known vectors
+- [x] C99 tests: `pzcore_json_tests` covers the SHA-256 known vectors
       (empty, `abc`, the quick-brown-fox string, and 10^6 × `a`), every short
       JSON escape, `\u00e9`, a surrogate-pair emoji, lone-surrogate and
       unknown-escape rejection, nested uint lookup, the Steam item `result`
@@ -81,7 +81,7 @@ Names such as `mod_manager.cpp` refer to files that have since been deleted.
 - [x] C filesystem layer: `src/core/fs_c.{h,c}` (paths, portable errors,
       sorted listing, `remove_all`, `copy_tree`, `read_all`), `fs_posix.c`, and
       `fs_win.c` form the `pzfs` library. The decisions are recorded in
-      [`fs-c-api.md`](fs-c-api.md). `pzcore_fs_c_tests` passes on Linux and the
+      [`fs-c-api.md`](fs-c-api.md). `pzcore_fs_tests` passes on Linux and the
       Win32 backend passes the same test source under Wine. `fs_posix.cpp` /
       `fs_win.cpp` remain as the legacy C++ path type for the UI and the
       not-yet-ported `mod.info`/activation wrappers; `ModManager` now uses
@@ -95,7 +95,7 @@ Names such as `mod_manager.cpp` refer to files that have since been deleted.
       inventory remains in [`modmanager-deps.md`](modmanager-deps.md).
 - [x] C99 process layer: `process_c.{h,c}` owns shell quoting, combined-output
       capture with line-by-line logging, detached children, and the
-      wait/running/PID probes. `steamcmd_c.c`, `net_c.c`, and `updater_c.c`
+      wait/running/PID probes. `steamcmd.c`, `net.c`, and `updater.c`
       call it for curl, tar, steamcmd, and the update helper, and the duplicated
       Win32 `CreateProcessW` /
       POSIX `posix_spawn` code is gone. The Windows wrapper adds
@@ -109,7 +109,7 @@ Names such as `mod_manager.cpp` refer to files that have since been deleted.
 - [x] C99 updater: `updater_c.{h,c}` owns the release check, cache cleanup,
       staging (download, size and digest verification, extraction, helper
       copy), and the `--apply-update` helper (wait, copy, preserve config,
-      swap, restart, clean). `app_c.c` and the C manager/command layers call it
+      swap, restart, clean). `app.c` and the C manager/command layers call it
       directly through `pz_updater_*`.
 - [x] C99 steamcmd: `steamcmd_c.{h,c}` owns the configured/built-in/system
       lookup, the one-time Valve download, the Workshop download command and
@@ -119,7 +119,7 @@ Names such as `mod_manager.cpp` refer to files that have since been deleted.
 - [x] C++ conversion shims removed: `steamcmd.cpp`/`.hpp`,
       `updater.cpp`/`.hpp`, `main.cpp`, the UI bridges, and `mod_icon.cpp` are
       deleted. The manager services, CLI, entry point, and tests call
-      `steamcmd_c.h`/`updater_c.h` directly; `pz_steamcmd_find` and
+      `steamcmd.h`/`updater.h` directly; `pz_steamcmd_find` and
       `pz_updater_platform_name` were added so no caller needs the old
       adapters.
 - [x] C99 command layer: `commands_c.{h,c}` owns the parser, batch handling,
@@ -128,20 +128,20 @@ Names such as `mod_manager.cpp` refer to files that have since been deleted.
       `LogFn` and `ModManager::core_handle()`.
 - [x] C99 icon decoder: `src/ui/mod_icon_c.{h,c}` owns the PNG decode and
       center-crop. Both native UIs call `pz_mod_icon_load` directly.
-- [x] X11 UI: `src/ui/x11/x11_ui_c.c` owns the window, drawing, rows, worker,
+- [x] X11 UI: `src/ui/x11/x11_ui.c` owns the window, drawing, rows, worker,
       settings, targets, clipboard, and inotify path. Button glyphs moved to
-      `src/ui/glyphs_c.h`.
-- [x] Win32 UI: `src/ui/win32/win32_ui_c.c` owns the native controls,
+      `src/ui/glyphs.h`.
+- [x] Win32 UI: `src/ui/win32/win32_ui.c` owns the native controls,
       owner-draw list/buttons, settings and targets dialogs, worker thread, and
       directory watcher; the C entry point is `win32_entry.c`. Button glyphs use
-      the shared `src/ui/glyphs_c.h` table.
-- [x] Remove the C++ runtime from the link: `src/main.c`, `src/app/app_c.c`,
+      the shared `src/ui/glyphs.h` table.
+- [x] Remove the C++ runtime from the link: `src/main.c`, `src/app/app.c`,
       the C UI entry points, and `pzcore` replace the C++ app path. The C++
       facade remains only in `pzcore_cpp` for `pzcore_tests`.
 
-All ten CTest tests pass on Linux, including `pzcore_json_c_tests`,
-`pzcore_fs_c_tests`, `pzcore_process_c_tests` (shell quoting, capture, line
-streaming, exit status, detached spawn, wait), and `pzcore_updater_c_tests`
+All ten CTest tests pass on Linux, including `pzcore_json_tests`,
+`pzcore_fs_tests`, `pzcore_process_tests` (shell quoting, capture, line
+streaming, exit status, detached spawn, wait), and `pzcore_updater_tests`
 (marker-based cache pruning, helper invocation, unsupported archive
 rejection). The filesystem test also passes when cross-built and run under
 Wine. The rest of the Windows app remains cross-build verification only.
@@ -189,7 +189,7 @@ path/file wrappers before claiming a reduction. Linux grew more because the old
 C++ manager was already LTO-specialized and inlined into the UI path.
 
 The process layer moved the same Win32 calls from `steamcmd.cpp` into
-`process_c.c`, so Windows grew by only 512 bytes. Linux gained 4,096 bytes: the
+`process.c`, so Windows grew by only 512 bytes. Linux gained 4,096 bytes: the
 C capture path keeps a `pz_str` output buffer plus a pending-line buffer, where
 the old template appended straight into `std::string`.
 
@@ -236,7 +236,7 @@ transitive libraries.
   and an opaque `pz_mod_manager*`; no parallel installed list or update map
   remains in C++.
 - C++ services are supplied through `pz_mm_services` rather than linking the C
-  file to C++. This keeps `mod_manager_c.c` a C99 translation unit and lets the
+  file to C++. This keeps `mod_manager.c` a C99 translation unit and lets the
   existing mod-info, activation, Steam Web API, steamcmd, and updater wrappers
   stay authoritative during the transition.
 - `write_target` receives nullable add/workshop vectors: `NULL` means "no IDs"
@@ -254,13 +254,13 @@ transitive libraries.
 ### C++ removal finished
 
 The test adapter was the last C++ consumer. `tests/test_core.cpp` was replaced
-by `tests/test_c_core.c`, which drives `pz_mod_manager` and `pz_command_run`
+by `tests/test_core.c`, which drives `pz_mod_manager` and `pz_command_run`
 directly, including install/update/import, activation lists, locks, config,
 mod.info discovery, and the fake steamcmd/curl flows. The C++ facade, path
 backend, command bridge, and `pzcore_cpp` target were then deleted.
 
 The app entry points are `src/main.c` and `src/ui/win32/win32_entry.c`; both
-call `pz_app_run()` in `src/app/app_c.c`.
+call `pz_app_run()` in `src/app/app.c`.
 
 ### UI size checkpoints (local rebuilds)
 
@@ -308,7 +308,7 @@ gone as well. The Windows import table contains only `GDI32`, `KERNEL32`,
   formatter paths, but that runtime remains in the app image.
 - `std::function` is gone. `LogFn` is now a function pointer plus an opaque
   context, with a small templated constructor for existing lambdas. The process
-  capture sink in `process_c.c` uses a `pz_log` callback with no C++ types.
+  capture sink in `process.c` uses a `pz_log` callback with no C++ types.
 - Small-list sorting no longer instantiates `std::sort`/`std::stable_sort`.
   Mod-info version selection, save/server target ordering, and UI row ordering
   use local stable insertion sorts. The stripped Linux app fell from 219,288
@@ -596,22 +596,21 @@ libstdc++ goal. The codebase already relies on C99-era libc facilities.
 The application does not use iostreams, regular expressions, RTTI,
 `std::filesystem`, or `std::function`. RTTI is disabled. There are no
 `try`/`catch` sites left; application targets compile with `-fno-exceptions`.
-The standalone Windows installer still uses the C++ standard library and keeps
-`installer/runtime_min.cpp` to turn allocation/string failures into abort paths
-instead of pulling in the C++ unwinder.
+The standalone Windows installer and uninstaller are C99 Win32 programs as
+well, so the whole distribution links only the C runtime.
 
 ## Where the work is concentrated
 
-- The app path is C99: `main.c`, `app_c.c`, `x11_ui_c.c`, `win32_ui_c.c`,
-  `win32_entry.c`, `mod_icon_c.c`, and the pure-C `pzcore` library.
+- The app path is C99: `main.c`, `app.c`, `x11_ui.c`, `win32_ui.c`,
+  `win32_entry.c`, `mod_icon.c`, and the pure-C `pzcore` library.
 - There are no C++ sources under `src/` or `tests/`; CMake enables only the C
   language.
-- Leaf modules are C99: `url.c`, `mod_info_c.c`, `paths_c.c`,
-  `activation_c.c`, `activation_targets_c.c`, `hash_c.c`, `json_c.c`,
-  `steam_json_c.c`, and `updater_json_c.c`. `paths_c.c` now also owns config
-  discovery/load/save; `activation_targets_c.c` owns target discovery and
+- Leaf modules are C99: `url.c`, `mod_info.c`, `paths.c`,
+  `activation.c`, `activation_targets.c`, `hash.c`, `json.c`,
+  `steam_json.c`, and `updater_json.c`. `paths.c` now also owns config
+  discovery/load/save; `activation_targets.c` owns target discovery and
   writes.
-- The standalone Windows installer and uninstaller remain C++ utilities under
+- The standalone Windows installer and uninstaller are C99 utilities under
   `installer/`; they are not part of the app target.
 - Third-party `stb_image.h`, Xlib, and Win32 are C APIs. They do not require a
   C++ runtime.
@@ -634,7 +633,7 @@ instead of pulling in the C++ unwinder.
    a C++ adapter.
 5. **Port the UI last.** Done: X11 and Win32 both call the C API directly. The
    X11 design record is [`c99-x11-port.md`](c99-x11-port.md).
-6. **Remove the C++ runtime from the link.** Done: `main.c`/`app_c.c` replace
+6. **Remove the C++ runtime from the link.** Done: `main.c`/`app.c` replace
    `main.cpp` and the facade in the app target. Linux `ldd` lists only `libX11`
    and `libc`; Windows `objdump -p` lists only system DLLs. No app or test target
    links C++.
@@ -655,9 +654,8 @@ instead of pulling in the C++ unwinder.
   audit every parser/config path before changing signatures.
 - Threading is already an open TODO. Converting it should not silently make UI
   actions blocking.
-- The Windows installer and uninstaller are separate C++ programs under
-  `installer/`. They also need conversion before the whole distribution is
-  libstdc++-free.
+- The Windows installer and uninstaller are separate C99 programs under
+  `installer/`. They link only the Windows SDK and C runtime.
 - The native messaging host is C99 but now depends on the sibling `pzmodmgr`
   executable being present and runnable. It must remain a console-subsystem
   program, and its add/update behavior is covered by the native-host test.

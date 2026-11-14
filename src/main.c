@@ -1,4 +1,4 @@
-#include "app/app_c.h"
+#include "app/app.h"
 
 #if !defined(_WIN32)
 int main(int argc, char** argv) {

@@ -3,7 +3,7 @@
 #endif
 #include <windows.h>
 
-#include "core/fs_c_internal.h"
+#include "core/fs_internal.h"
 
 #include <errno.h>
 #include <limits.h>

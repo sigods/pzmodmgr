@@ -1,9 +1,9 @@
 # X11 UI C99 port: investigation and handoff
 
-Status: **implemented** on `c99/leaf-modules`. `src/ui/x11/x11_ui_c.c` is the
-X11 UI. The C++ bridge was removed when `src/main.c` and `src/app/app_c.c` took
+Status: **implemented** on `c99/leaf-modules`. `src/ui/x11/x11_ui.c` is the
+X11 UI. The C++ bridge was removed when `src/main.c` and `src/app/app.c` took
 over the app entry path. The Win32 UI was ported separately to
-`src/ui/win32/win32_ui_c.c` and is no longer C++ either.
+`src/ui/win32/win32_ui.c` and is no longer C++ either.
 
 This document is retained as the design/ownership record. The phase headings
 below are historical; all seven phases landed in the implementation. Verification
@@ -30,9 +30,9 @@ This is the first UI port. Do not convert both UIs at once.
 | Command parser | `src/core/commands_c.{h,c}` | C99, authoritative |
 | `mod.info` traversal/icon resolution | `src/core/mod_info_fs_c.{h,c}` | C99, authoritative |
 | PNG thumbnail decoder | `src/ui/mod_icon_c.{h,c}` | C99, authoritative |
-| X11 UI | `src/ui/x11/x11_ui_c.c` | C99, 3,294 lines |
+| X11 UI | `src/ui/x11/x11_ui.c` | C99, 3,294 lines |
 | X11 bridge | `src/ui/x11/x11_ui.cpp` | 6-line C++ bridge |
-| Button glyphs | `src/ui/glyphs_c.h` | C99 table, 16 glyphs |
+| Button glyphs | `src/ui/glyphs.h` | C99 table, 16 glyphs |
 | C++ bridges | `commands.cpp` 24, `mod_info.cpp` 98, `mod_icon.cpp` 19 | conversions only |
 
 The C manager still receives services from `mod_manager.cpp`; those callbacks
@@ -65,7 +65,7 @@ bridge is only:
 
 ```cpp
 #include "ui/ui.hpp"
-#include "ui/x11/x11_ui_c.h"
+#include "ui/x11/x11_ui.h"
 namespace pz {
 int run_ui(ModManager& mm) { return pz_x11_run_ui(mm.core_handle()); }
 }
@@ -244,21 +244,21 @@ C++ body until the C window opens and the main screen paints.
 
 ### Phase 0 — bridge and empty window
 
-1. Add `src/ui/x11/x11_ui_c.h`:
+1. Add `src/ui/x11/x11_ui.h`:
    ```c
    int pz_x11_run_ui(pz_mod_manager* manager);
    ```
 2. Replace `x11_ui.cpp` with the 8-line bridge above.
-3. Add `x11_ui_c.c` with `pz_x11_run_ui` that opens the display, creates the
+3. Add `x11_ui.c` with `pz_x11_run_ui` that opens the display, creates the
    window, prints an error if `XOpenDisplay` fails, and returns 0.
-4. Add `src/ui/x11/x11_ui_c.c` to the Linux `pzmodmgr` sources in
+4. Add `src/ui/x11/x11_ui.c` to the Linux `pzmodmgr` sources in
    `CMakeLists.txt`.
 5. Build and run under Xvfb. Acceptance: an empty `PZ Mod Manager` window
    exists and the CLI still prints `OK: 0 mod(s)`.
 
 ### Phase 1 — shared leaves
 
-1. Create `src/ui/glyphs_c.h` from `glyphs.hpp`: one `const char* const
+1. Create `src/ui/glyphs.h` from `glyphs.hpp`: one `const char* const
    rows[16]` per glyph, an enum for the 16 glyphs, and a loop replacing
    `glyphs::visit`.
 2. Port the model helpers from `ui/ui.hpp`:
@@ -420,7 +420,7 @@ some C++ runtime symbols in the Linux binary until `main.cpp`/the facade move.
 
 - `src/ui/x11/x11_ui.cpp` is a bridge of at most ~20 lines, or is deleted after
   `main.cpp` moves to C.
-- `src/ui/x11/x11_ui_c.c` is C99, compiles with the project's C standard, and
+- `src/ui/x11/x11_ui.c` is C99, compiles with the project's C standard, and
   contains no `std::`, lambdas, classes, or C++ headers.
 - The window renders at 920×720 with the same layout, theme toggle, rows,
   filters, settings, targets, clipboard, and activity behavior.
@@ -432,7 +432,7 @@ some C++ runtime symbols in the Linux binary until `main.cpp`/the facade move.
 ## Follow-up work
 
 The X11 and Win32 UI ports, the C entry-point conversion, and the test-suite
-conversion are finished. `src/main.c` and `src/app/app_c.c` call
+conversion are finished. `src/main.c` and `src/app/app.c` call
 `pz_x11_run_ui(pz_mod_manager*)` directly. The repository no longer contains
 C++ sources, and CMake enables only C.
 
