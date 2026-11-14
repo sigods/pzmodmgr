@@ -1176,7 +1176,7 @@ static int button_glyph(Btn button) {
     case BtnShareTargets: return PzGlyphCopy;
     case BtnFilterMenu: return PzGlyphFilter;
     case BtnSort: return PzGlyphSort;
-    case BtnCheck:
+    case BtnCheck: return PzGlyphRefresh;
     case BtnEnable:
     case BtnEnableTarget: return PzGlyphCheck;
     case BtnSettings: return PzGlyphSettings;

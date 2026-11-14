@@ -2054,7 +2054,7 @@ static int glyph_for_id(int id) {
     case PZ_WIN_ID_SETTINGS: return PzGlyphSettings;
     case PZ_WIN_ID_SET_SAVE: return PzGlyphSave;
     case PZ_WIN_ID_SET_THEME: return PzGlyphTheme;
-    case PZ_WIN_ID_CHECK:
+    case PZ_WIN_ID_CHECK: return PzGlyphRefresh;
     case PZ_WIN_ID_ENABLE:
     case PZ_WIN_ID_TGT_ENABLE: return PzGlyphCheck;
     case PZ_WIN_ID_SHARE_SERVER: return PzGlyphServer;
@@ -2834,7 +2834,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
-    case WM_CLOSE:
+    case WM_CLOSE: {
         pz_paths_config config;
         pz_paths_config_init(&config);
         pz_mod_manager_get_config(g_ui.manager, &config);
@@ -2843,6 +2843,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         pz_paths_config_free(&config);
         DestroyWindow(hwnd);
         return 0;
+    }
     case WM_DESTROY:
         g_ui.settings_wnd = NULL;
         g_ui.set_auto = NULL;

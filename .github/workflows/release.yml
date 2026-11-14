@@ -15,7 +15,7 @@ jobs:
   linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build dependencies
         run: |
@@ -46,7 +46,7 @@ jobs:
           tar -tzf "dist/PZModManager-$version-linux-x86_64.tar.gz" >/dev/null
           (cd dist && sha256sum -c SHA256SUMS)
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: linux
           if-no-files-found: error
@@ -57,7 +57,7 @@ jobs:
   windows:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install MinGW-w64 and UPX
         run: |
@@ -95,7 +95,7 @@ jobs:
           "$upx_bin" -t "/tmp/pzmodmgr-win-unpacked/PZModManager-$version-win64/pzmodmgr.exe"
           "$upx_bin" -t "$setup"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows
           if-no-files-found: error
@@ -109,7 +109,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: release
           merge-multiple: true
